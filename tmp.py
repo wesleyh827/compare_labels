@@ -383,7 +383,7 @@ class ImageAligner:
                     print(f"Detected: '{text}' (confidence: {confidence_percent}%)")
                 
                 # Set confidence threshold (EasyOCR confidence is between 0-1)
-                if text and confidence > 0.3:  # 30% confidence
+                if text and confidence > 0.17:  # 30% confidence
                     # Convert bbox format - EasyOCR returns four corner points
                     # Calculate bounding box
                     bbox_array = np.array(bbox)
@@ -538,7 +538,7 @@ class ImageAligner:
             print(f"Image 2: Found {len(ocr_result2['text_blocks'])} text blocks")
             
             if len(ocr_result1['text_blocks']) == 0 and len(ocr_result2['text_blocks']) == 0:
-                print("⚠️ No text detected in either image!")
+                print("No text detected in either image!")
                 return {
                     'ocr_result1': ocr_result1,
                     'ocr_result2': ocr_result2,
@@ -683,42 +683,36 @@ def main():
     aligner = ImageAligner()
     
     aligner.easyocr_reader = None
-    aligner.easyocr_languages = ['en', 'ch_tra'] 
-    aligner.text_similarity_threshold = 0.8
+    aligner.easyocr_languages = ['en'] 
+    aligner.text_similarity_threshold = 0.6
 
     print("=== Image Alignment Workflow ===")
     
     # Read images - Please modify to your actual image paths
-    img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\test1.jpg'  # Design image path
-    img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\test1.jpg'  # Reference image path
+    img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\test1.jpg'  # Reference image path
+    img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\test1.jpg'  # Design image path
     
     print(f"Reading images...")
-    print(f"Design image path: {img1_path}")
-    print(f"Reference image path: {img2_path}")
+    print(f"Reference image path: {img1_path}")
+    print(f"Design image path: {img2_path}")
     
     img1 = cv2.imread(img1_path)
     img2 = cv2.imread(img2_path)
     
     # Check if images were successfully loaded
     if img1 is None:
-        print(f"Error: Cannot read design image '{img1_path}'")
-        print("Please check:")
-        print("1. File path is correct")
-        print("2. File exists")
-        print("3. File format is supported (jpg, png, bmp, etc.)")
+        print(f"Error: Cannot read reference image '{img1_path}'")
+
         return
     
     if img2 is None:
-        print(f"Error: Cannot read reference image '{img2_path}'")
-        print("Please check:")
-        print("1. File path is correct")
-        print("2. File exists")
-        print("3. File format is supported (jpg, png, bmp, etc.)")
+        print(f"Error: Cannot read design image '{img2_path}'")
+        
         return
     
     print(f"Successfully loaded images")
-    print(f"Design image dimensions: {img1.shape}")
-    print(f"Reference image dimensions: {img2.shape}")
+    print(f"Reference image dimensions: {img1.shape}")
+    print(f"Design image dimensions: {img2.shape}")
     
     try:
         # Perform alignment
@@ -771,32 +765,14 @@ def main():
             print(f"Text similarity: {text_sim:.1f}%")
             print(f"Overall score: {(image_sim + text_sim) / 2:.1f}%")
         else:
-            print(f"Text comparison failed: {text_comparison['error']}")
-            print("Please install: pip install easyocr")         
+            print(f"Text comparison failed: {text_comparison['error']}")         
     except Exception as e:
         print(f"Error occurred during processing: {str(e)}")
         print("Please check image format and content")
 
-# Simplified test version
-def test_with_sample():
-    """Test with sample images"""
-    print("=== Test Mode ===")
-    print("If you want to test the functionality, please:")
-    print("1. Place your image files in the same directory")
-    print("2. Modify img1_path and img2_path in the main() function")
-    print("3. Or use the following code to read images:")
-    print()
-    print("# Example code:")
-    print("img1 = cv2.imread('your_design_image.jpg')")
-    print("img2 = cv2.imread('your_reference_image.jpg')")
-    print()
-    print("# Confirm images are loaded:")
-    print("print('Design image:', img1.shape if img1 is not None else 'None')")
-    print("print('Reference image:', img2.shape if img2 is not None else 'None')")
+
 
 if __name__ == "__main__":
     
-    try:
-        main()
-    except:
-        test_with_sample()
+    main()
+    
