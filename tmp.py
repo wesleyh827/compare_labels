@@ -5,6 +5,7 @@ from typing import Tuple, List, Optional, Dict
 import easyocr
 from difflib import SequenceMatcher
 import re
+import color_correction
 
 class ImageAligner:
     def __init__(self):
@@ -709,7 +710,13 @@ def main():
         print(f"Error: Cannot read design image '{img2_path}'")
         
         return
-    
+    """
+    FW_Zhenzhe
+    EA_QQ
+    FPT_Maris
+    BRU_Nunu
+    BAC_Kimsensei
+    """
     print(f"Successfully loaded images")
     print(f"Reference image dimensions: {img1.shape}")
     print(f"Design image dimensions: {img2.shape}")
@@ -718,7 +725,24 @@ def main():
         # Perform alignment
         print("\n=== Starting Image Alignment ===")
         aligned_img1, img2, match_data = aligner.align_images_sift(img1, img2)
+
+        print("\n=== Starting Color Adjustment ===")
+
+        """
+        print("\n=== Saving Aligned Images ===")
+
+        # Set output path
+        output_dir = r'C:\Users\hti07022\Desktop\compare_labels\aligned_results'
         
+        import os
+        # Save aligned image
+        aligned_img1_path = os.path.join(output_dir, 'aligned_image1.jpg')
+        original_img2_path = os.path.join(output_dir, 'reference_image2.jpg')
+
+        # Write to file
+        cv2.imwrite(aligned_img1_path, aligned_img1)
+        cv2.imwrite(original_img2_path, img2)
+        """
         # Visualize matching results
         print("\n=== Displaying Feature Matching Results ===")
         aligner.visualize_matches(img1, img2, match_data)
@@ -726,7 +750,7 @@ def main():
         # Detailed comparison of aligned images
         print("\n=== Starting Detailed Comparison Analysis ===")
         analysis_result = aligner.compare_aligned_images(aligned_img1, img2, threshold=150)
-        
+
         # Output analysis report
         print(f"\n=== Analysis Report ===")
         print(f"Overall similarity: {analysis_result['similarity_percent']:.2f}%")
