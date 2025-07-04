@@ -310,7 +310,7 @@ def main(image1_path, image2_path, window_size, step_size):
 # Usage example
 if __name__ == "__main__":
     # Replace with your image paths
-    image1_path = r"C:\Users\hti07022\Desktop\compare_labels\aligned_results\aligned_image1.jpg"  # Original image
+    image1_path = r"C:\Users\hti07022\Desktop\compare_labels\test1_color.png"  # Original image
     image2_path = r"C:\Users\hti07022\Desktop\compare_labels\aligned_results\reference_image2.jpg"  # Adjusted image
     
     # Run analysis
