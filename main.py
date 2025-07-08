@@ -272,7 +272,7 @@ class ImageAligner:
             
             # Draw points
             cv2.circle(img_combined, pt1_int, 3, color, -1)
-            cv2.circle(img_combined, pt2_int, 3, color, -1)
+            cv2.circle(img_combined, pt2_int, 3, color, -1) # yoyoooooo
             
             # Draw lines
             cv2.line(img_combined, pt1_int, pt2_int, color, 1)
@@ -285,47 +285,111 @@ class ImageAligner:
     
     def analyze_differences(self, img1: np.ndarray, img2: np.ndarray, threshold: int = 30):
         """Detailed analysis of differences between two aligned images"""
-        print("=== Starting detailed difference analysis ===")
+        print("=== Starting color-aware difference analysis ===")
         
-        # Convert to grayscale for analysis
+        # 1. Structural difference analysis (original grayscale method)
         gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if len(img1.shape) == 3 else img1
         gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if len(img2.shape) == 3 else img2
         
-        # Calculate differences
-        diff = cv2.absdiff(gray1, gray2)
+        # Calculate grayscale differences
+        gray_diff = cv2.absdiff(gray1, gray2)
+        _, gray_diff_binary = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY)
         
-        # Create binary difference image
-        _, diff_binary = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+        # 2. Color difference analysis (newly added)
+        # Calculate difference for each color channel
+        color_diff = cv2.absdiff(img1, img2)
         
-        # Calculate difference statistics
+        # Calculate color distance for each pixel (Euclidean distance)
+        color_distance = np.sqrt(np.sum(color_diff.astype(float)**2, axis=2))
+        
+        # Create binary image for color differences (using lower threshold for more color sensitivity)
+        color_threshold = threshold * 1  # More sensitive to color
+        _, color_diff_binary = cv2.threshold(color_distance.astype(np.uint8), 
+                                            color_threshold, 255, cv2.THRESH_BINARY)
+        
+        # 3. Combined difference analysis
+        # Combine structural and color differences
+        combined_diff_binary = cv2.bitwise_or(gray_diff_binary, color_diff_binary)
+        
+        # Calculate statistics
         total_pixels = img1.shape[0] * img1.shape[1]
-        diff_pixels = np.count_nonzero(diff_binary)
-        similarity_percent = ((total_pixels - diff_pixels) / total_pixels) * 100
         
-        print(f"Image similarity: {similarity_percent:.2f}%")
-        print(f"Different pixels: {diff_pixels:,} / {total_pixels:,}")
+        # Grayscale difference statistics
+        gray_diff_pixels = np.count_nonzero(gray_diff_binary)
+        gray_similarity = ((total_pixels - gray_diff_pixels) / total_pixels) * 100
         
-        # Find contours of difference regions
-        contours, _ = cv2.findContours(diff_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Color difference statistics
+        color_diff_pixels = np.count_nonzero(color_diff_binary)
+        color_similarity = ((total_pixels - color_diff_pixels) / total_pixels) * 100
         
-        # Filter small difference regions
-        min_area = 50  # Minimum area threshold
+        # Combined difference statistics
+        combined_diff_pixels = np.count_nonzero(combined_diff_binary)
+        combined_similarity = ((total_pixels - combined_diff_pixels) / total_pixels) * 100
+        
+        # 4. Detailed color analysis
+        # Calculate average difference for RGB channels
+        r_diff = np.mean(np.abs(img1[:,:,2].astype(float) - img2[:,:,2].astype(float)))
+        g_diff = np.mean(np.abs(img1[:,:,1].astype(float) - img2[:,:,1].astype(float)))
+        b_diff = np.mean(np.abs(img1[:,:,0].astype(float) - img2[:,:,0].astype(float)))
+        
+        # Calculate HSV differences
+        hsv1 = cv2.cvtColor(img1, cv2.COLOR_BGR2HSV)
+        hsv2 = cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)
+        
+        # Hue difference (considering circularity)
+        h_diff = np.minimum(np.abs(hsv1[:,:,0].astype(float) - hsv2[:,:,0].astype(float)), 
+                           180 - np.abs(hsv1[:,:,0].astype(float) - hsv2[:,:,0].astype(float)))
+        avg_hue_diff = np.mean(h_diff)
+        
+        # Saturation and value differences
+        avg_sat_diff = np.mean(np.abs(hsv1[:,:,1].astype(float) - hsv2[:,:,1].astype(float)))
+        avg_val_diff = np.mean(np.abs(hsv1[:,:,2].astype(float) - hsv2[:,:,2].astype(float)))
+        
+        print(f"Structural similarity (grayscale): {gray_similarity:.2f}%")
+        print(f"Color similarity: {color_similarity:.2f}%")
+        print(f"Combined similarity: {combined_similarity:.2f}%")
+        print(f"RGB differences: R={r_diff:.1f}, G={g_diff:.1f}, B={b_diff:.1f}")
+        print(f"HSV differences: H={avg_hue_diff:.1f}°, S={avg_sat_diff:.1f}, V={avg_val_diff:.1f}")
+        
+        # 5. Find difference regions
+        contours, _ = cv2.findContours(combined_diff_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_area = 50
         significant_contours = [c for c in contours if cv2.contourArea(c) > min_area]
         
         print(f"Found {len(significant_contours)} significant difference regions")
         
+        # 6. Determine main difference type
+        if color_diff_pixels > gray_diff_pixels * 1.5:
+            main_difference = "Mainly color differences"
+        elif gray_diff_pixels > color_diff_pixels * 1.5:
+            main_difference = "Mainly structural differences"
+        else:
+            main_difference = "Both color and structural differences"
+        
+        print(f"Difference type: {main_difference}")
+        
         return {
-            'similarity_percent': similarity_percent,
-            'diff_pixels': diff_pixels,
+            'similarity_percent': combined_similarity,  # Use combined similarity as main metric
+            'gray_similarity': gray_similarity,
+            'color_similarity': color_similarity,
+            'combined_similarity': combined_similarity,
+            'diff_pixels': combined_diff_pixels,
             'total_pixels': total_pixels,
-            'diff_image': diff,
-            'diff_binary': diff_binary,
-            'contours': significant_contours
+            'diff_image': color_distance,  # Use color distance map
+            'diff_binary': combined_diff_binary,  # Use combined differences
+            'gray_diff_binary': gray_diff_binary,
+            'color_diff_binary': color_diff_binary,
+            'contours': significant_contours,
+            'rgb_differences': {'r': r_diff, 'g': g_diff, 'b': b_diff},
+            'hsv_differences': {'h': avg_hue_diff, 's': avg_sat_diff, 'v': avg_val_diff},
+            'main_difference_type': main_difference,
+            'is_significant_color_difference': avg_hue_diff > 10 or r_diff > 30 or g_diff > 30 or b_diff > 30
         }
     
     def compare_aligned_images(self, img1: np.ndarray, img2: np.ndarray, threshold: int = 30):
-        """Compare aligned images"""
-        # Perform detailed analysis
+        print("=== Enhanced Image Comparison with Color Analysis ===")
+        
+        # Use improved difference analysis
         analysis = self.analyze_differences(img1, img2, threshold)
         
         # Create images with marked differences
@@ -335,47 +399,107 @@ class ImageAligner:
         # Draw boxes around difference regions
         for contour in analysis['contours']:
             x, y, w, h = cv2.boundingRect(contour)
-            cv2.rectangle(img1_marked, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.rectangle(img2_marked, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            color = (0, 0, 255) if analysis['is_significant_color_difference'] else (0, 255, 0)
+            cv2.rectangle(img1_marked, (x, y), (x+w, y+h), color, 2)
+            cv2.rectangle(img2_marked, (x, y), (x+w, y+h), color, 2)
         
-        # Display results
-        fig, axes = plt.subplots(3, 2, figsize=(15, 18))
+        # Create more detailed visualization
+        fig, axes = plt.subplots(4, 2, figsize=(16, 20))
         
-        # Original aligned images
-        axes[0, 0].imshow(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB) if len(img1.shape) == 3 else img1, cmap='gray')
-        axes[0, 0].set_title('Color Corrected Design Image')
+        # First row: original images
+        axes[0, 0].imshow(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB))
+        axes[0, 0].set_title('Color Corrected Image')
         axes[0, 0].axis('off')
         
-        axes[0, 1].imshow(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB) if len(img2.shape) == 3 else img2, cmap='gray')
-        axes[0, 1].set_title('Reference Original')
+        axes[0, 1].imshow(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
+        axes[0, 1].set_title('Reference Image')
         axes[0, 1].axis('off')
         
-        # Images with marked differences
-        axes[1, 0].imshow(cv2.cvtColor(img1_marked, cv2.COLOR_BGR2RGB) if len(img1_marked.shape) == 3 else img1_marked, cmap='gray')
-        axes[1, 0].set_title(f'Design Image (Marked {len(analysis["contours"])} difference regions)')
+        # Second row: images with marked differences
+        axes[1, 0].imshow(cv2.cvtColor(img1_marked, cv2.COLOR_BGR2RGB))
+        axes[1, 0].set_title(f'Marked Difference Regions ({len(analysis["contours"])} regions)')
         axes[1, 0].axis('off')
         
-        axes[1, 1].imshow(cv2.cvtColor(img2_marked, cv2.COLOR_BGR2RGB) if len(img2_marked.shape) == 3 else img2_marked, cmap='gray')
-        axes[1, 1].set_title(f'Original (Marked {len(analysis["contours"])} difference regions)')
+        axes[1, 1].imshow(cv2.cvtColor(img2_marked, cv2.COLOR_BGR2RGB))
+        axes[1, 1].set_title(f'Reference Image (Corresponding Regions Marked)')
         axes[1, 1].axis('off')
         
-        # Difference analysis images
+        # Third row: difference analysis
         axes[2, 0].imshow(analysis['diff_image'], cmap='hot')
-        axes[2, 0].set_title('Difference Intensity Map')
+        axes[2, 0].set_title('Color Distance Heatmap')
         axes[2, 0].axis('off')
         
         axes[2, 1].imshow(analysis['diff_binary'], cmap='gray')
-        axes[2, 1].set_title(f'Binary Difference Map (threshold={threshold})')
+        axes[2, 1].set_title(f'Combined Difference Map (threshold={threshold})')
         axes[2, 1].axis('off')
         
-        # Add statistical information
-        fig.suptitle(f'Image Comparison Analysis - Similarity: {analysis["similarity_percent"]:.2f}%', fontsize=16)
+        # Fourth row: various difference comparisons
+        axes[3, 0].imshow(analysis['gray_diff_binary'], cmap='gray')
+        axes[3, 0].set_title(f'Structural Differences ({analysis["gray_similarity"]:.1f}%)')
+        axes[3, 0].axis('off')
         
+        axes[3, 1].imshow(analysis['color_diff_binary'], cmap='gray')
+        axes[3, 1].set_title(f'Color Differences ({analysis["color_similarity"]:.1f}%)')
+        axes[3, 1].axis('off')
+        
+        # Add detailed statistical information
+        title_text = f'''Image Comparison Analysis - Combined Similarity: {analysis["combined_similarity"]:.2f}%
+Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {analysis["color_similarity"]:.1f}%
+{analysis["main_difference_type"]}'''
+        
+        fig.suptitle(title_text, fontsize=14)
         plt.tight_layout()
         plt.show()
         
+        # Print detailed report
+        self.print_enhanced_analysis_report(analysis)
+        
         return analysis
     
+    def print_enhanced_analysis_report(self, analysis: Dict):
+        """Print enhanced analysis report"""
+        print("\n" + "="*60)
+        print("Enhanced Image Analysis Report")
+        print("="*60)
+        
+        print(f" Similarity Analysis:")
+        print(f"   Structural similarity (grayscale): {analysis['gray_similarity']:.2f}%")
+        print(f"   Color similarity: {analysis['color_similarity']:.2f}%")
+        print(f"   Combined similarity: {analysis['combined_similarity']:.2f}%")
+        
+        print(f"\n Color Difference Details:")
+        rgb = analysis['rgb_differences']
+        hsv = analysis['hsv_differences']
+        print(f"   RGB channel differences: R={rgb['r']:.1f}, G={rgb['g']:.1f}, B={rgb['b']:.1f}")
+        print(f"   HSV differences: Hue={hsv['h']:.1f}°, Saturation={hsv['s']:.1f}, Value={hsv['v']:.1f}")
+        
+        print(f"\n Difference Assessment:")
+        print(f"   Main difference type: {analysis['main_difference_type']}")
+        print(f"   Significant difference regions: {len(analysis['contours'])}")
+        print(f"   Has significant color differences: {'Yes' if analysis['is_significant_color_difference'] else 'No'}")
+        
+        # Specific difference level assessment
+        if analysis['combined_similarity'] > 95:
+            assessment = "Images are nearly identical"
+        elif analysis['combined_similarity'] > 85:
+            assessment = "Images are basically similar with minor differences"
+        elif analysis['combined_similarity'] > 70:
+            assessment = "Images have noticeable differences that need attention"
+        else:
+            assessment = "Images have significant differences, potential issues"
+        
+        print(f"\n Assessment Conclusion: {assessment}")
+        
+        # Special reminder for color differences
+        if analysis['is_significant_color_difference']:
+            print(f"  Important Note: Significant color differences detected!")
+            if hsv['h'] > 20:
+                print(f"   - Large hue difference ({hsv['h']:.1f}°), possibly different colored packaging")
+            if rgb['r'] > 50 or rgb['g'] > 50 or rgb['b'] > 50:
+                print(f"   - Obvious RGB channel differences, color adjustment may be incomplete")
+        
+        print("="*60)
+
     def preprocess_for_ocr(self, image: np.ndarray, method: str = 'default') -> np.ndarray:
         """Preprocess image for better OCR results"""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
@@ -399,7 +523,7 @@ class ImageAligner:
             kernel = np.ones((1, 1), np.uint8)
             processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel)
         elif method == 'original':
-            # Use original grayscale, no preprocessing
+            # Use original grayscale, no preprocessing 
             processed = gray
         else:
             processed = gray
@@ -418,7 +542,7 @@ class ImageAligner:
         try:
             print("Starting EasyOCR extraction...")
             
-            # Ensure correct image format
+            # Ensure correct image format 
             if len(image.shape) == 3:
                 # EasyOCR can directly process color images
                 processed_img = image
@@ -449,7 +573,7 @@ class ImageAligner:
                     print(f"Detected: '{text}' (confidence: {confidence_percent}%)")
                 
                 # Set confidence threshold (EasyOCR confidence is between 0-1)
-                if text and confidence > 0.17:  # 30% confidence
+                if text and confidence > 0.25:  # 25% confidence 
                     # Convert bbox format - EasyOCR returns four corner points
                     # Calculate bounding box
                     bbox_array = np.array(bbox)
@@ -480,7 +604,7 @@ class ImageAligner:
             }
             
         except Exception as e:
-            print(f" EasyOCR extraction failed: {e}")
+            print(f"EasyOCR extraction failed: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -589,14 +713,14 @@ class ImageAligner:
             ocr_result1 = self.extract_text_with_positions_easyocr(img1)
             
             if 'error' in ocr_result1:
-                print(f" EasyOCR failed for image 1: {ocr_result1['error']}")
+                print(f"EasyOCR failed for image 1: {ocr_result1['error']}")
                 return {'error': f"EasyOCR failed for image 1: {ocr_result1['error']}"}
             
             print("\n--- EXTRACTING TEXT FROM IMAGE 2 WITH EASYOCR ---")
             ocr_result2 = self.extract_text_with_positions_easyocr(img2)
             
             if 'error' in ocr_result2:
-                print(f" EasyOCR failed for image 2: {ocr_result2['error']}")
+                print(f"EasyOCR failed for image 2: {ocr_result2['error']}")
                 return {'error': f"EasyOCR failed for image 2: {ocr_result2['error']}"}
             
             print(f"\n--- EASYOCR RESULTS SUMMARY ---")
@@ -639,7 +763,7 @@ class ImageAligner:
             
         except Exception as e:
             error_msg = f"Text comparison failed: {str(e)}"
-            print(f" {error_msg}")
+            print(f"{error_msg}")
             import traceback
             traceback.print_exc()
             return {'error': error_msg}
@@ -746,24 +870,23 @@ class ImageAligner:
 
 # Usage Example
 def main():
-    """Main usage workflow with color correction"""
-    aligner = ImageAligner()
     
-    # Initialize parameters
+    aligner = ImageAligner()
+
     aligner.easyocr_reader = None
     aligner.easyocr_languages = ['en'] 
-    aligner.text_similarity_threshold = 0.6
+    aligner.text_similarity_threshold = 0.7
     
     # Color correction parameters
     aligner.color_correction_enabled = True
     aligner.color_correction_window_size = 100
     aligner.color_correction_step_size = 50
 
-    print("=== Enhanced Image Alignment Workflow with Color Correction ===")
+    print("=== Enhanced Image Alignment Workflow with Color-Aware Analysis ===")
     
     # Read images - Please modify to your actual image paths
-    img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\test2.png'  # Reference image path
-    img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\test2.jpg'  # Design image path
+    img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\test1-1.jpg'
+    img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\test1.jpg'
     
     print(f"Reading images...")
     print(f"Reference image path: {img1_path}")
@@ -803,30 +926,27 @@ def main():
             color_corrected_img1 = aligned_img1
             print("Color correction disabled, using aligned image directly")
         
-        # Step 3: Detailed comparison of color-corrected images
-        print("\n=== Step 3: Starting Detailed Comparison Analysis ===")
-        analysis_result = aligner.compare_aligned_images(color_corrected_img1, img2, threshold=100)
-
-        # Output analysis report
-        print(f"\n=== Analysis Report ===")
-        print(f"Overall similarity: {analysis_result['similarity_percent']:.2f}%")
-        print(f"Found {len(analysis_result['contours'])} significant difference regions")
+        # Step 3: Enhanced comparison with color awareness
+        print("\n=== Step 3: Enhanced Color-Aware Comparison Analysis ===")
         
-        if analysis_result['similarity_percent'] > 95:
-            print("Images are highly similar with minimal differences")
-        elif analysis_result['similarity_percent'] > 85:
-            print("Images are basically similar, but some differences need checking")
-        else:
-            print("Images have significant differences, detailed inspection required")
+        # Use new color-aware comparison method
+        enhanced_analysis = aligner.compare_aligned_images(color_corrected_img1, img2, threshold=150)
         
-        # Fine-tune analysis with different thresholds
-        print("\n=== Analysis with Different Thresholds ===")
+        # Also run original method for comparison
+        print(f"\nMethod comparison results:")
+        print(f"   Enhanced method combined similarity: {enhanced_analysis['combined_similarity']:.2f}%")
+        print(f"   Enhanced method structural similarity: {enhanced_analysis['gray_similarity']:.2f}%")
+        print(f"   Enhanced method color similarity: {enhanced_analysis['color_similarity']:.2f}%")
+        
+        final_image_similarity = enhanced_analysis['combined_similarity']
+        
+        # Fine-tune analysis with different thresholds (using enhanced method)
+        print("\n=== Analysis with Different Thresholds (Enhanced Method) ===")
         for thresh in [10, 20, 50, 100, 200]:
             analysis = aligner.analyze_differences(color_corrected_img1, img2, thresh)
-            contours, _ = cv2.findContours(analysis['diff_binary'], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            significant_contours = [c for c in contours if cv2.contourArea(c) > 50]
-            print(f"Threshold {thresh}: Similarity {analysis['similarity_percent']:.2f}%, "
-                  f"Difference regions {len(significant_contours)}")
+            print(f"Threshold {thresh}: Combined similarity {analysis['combined_similarity']:.2f}%, "
+                  f"Color similarity {analysis['color_similarity']:.2f}%, "
+                  f"Difference regions {len(analysis['contours'])}")
 
         # Step 4: EasyOCR text comparison
         print("\n=== Step 4: EasyOCR Text Content Analysis ===")
@@ -836,19 +956,38 @@ def main():
             print("Text comparison completed!")
             aligner.visualize_text_differences(color_corrected_img1, img2, text_comparison)
             
-            # Step 5: Comprehensive evaluation
-            image_sim = analysis_result['similarity_percent']
+            # Step 5: Comprehensive evaluation with enhanced analysis
             text_sim = text_comparison['overall_similarity'] * 100
             
-            print(f"\n=== Final Assessment ===")
-            print(f"Image similarity (after color correction): {image_sim:.1f}%")
-            print(f"Text similarity: {text_sim:.1f}%")
-            print(f"Overall score: {(image_sim + text_sim) / 2:.1f}%")
+            print(f"\n=== Final Assessment (Using Enhanced Method) ===")
+            print(f"Detailed Similarity Analysis:")
+            print(f"   Structural similarity: {enhanced_analysis['gray_similarity']:.1f}%")
+            print(f"   Color similarity: {enhanced_analysis['color_similarity']:.1f}%")
+            print(f"   Combined image similarity: {final_image_similarity:.1f}%")
+            print(f"   Text similarity: {text_sim:.1f}%")
+            print(f"   Final combined score: {(final_image_similarity + text_sim) / 2:.1f}%")
             
-            # Save results if needed
+            print(f"\nColor Difference Assessment:")
+            hsv = enhanced_analysis['hsv_differences']
+            rgb = enhanced_analysis['rgb_differences']
+            print(f"   Hue difference: {hsv['h']:.1f}° ({'Significant' if hsv['h'] > 20 else 'Minor'})")
+            print(f"   RGB average differences: R={rgb['r']:.1f}, G={rgb['g']:.1f}, B={rgb['b']:.1f}")
+            print(f"   Main difference type: {enhanced_analysis['main_difference_type']}")
+            
+            print(f"\nFinal Determination:")
+            if final_image_similarity > 90 and text_sim > 80 and not enhanced_analysis['is_significant_color_difference']:
+                print("   Label is basically consistent with design")
+            elif enhanced_analysis['is_significant_color_difference']:
+                print("   Significant color differences detected, possible color printing issue")
+            elif final_image_similarity < 70:
+                print("   Label differs significantly from design, technical issues exist")
+            else:
+                print("   Label has some differences from design, requires further inspection")
+            
+            # Save results
             save_results = True
             if save_results:
-                print("\n=== Saving Results ===")
+                print("\n=== Saving Enhanced Results ===")
                 output_dir = r'C:\Users\hti07022\Desktop\compare_labels\enhanced_results'
                 import os
                 os.makedirs(output_dir, exist_ok=True)
@@ -862,16 +1001,27 @@ def main():
                 # Save reference image
                 cv2.imwrite(os.path.join(output_dir, 'reference_image2.jpg'), img2)
                 
-                print(f"Results saved to: {output_dir}")
+                # Save analysis report
+                with open(os.path.join(output_dir, 'enhanced_analysis_report.txt'), 'w', encoding='utf-8') as f:
+                    f.write("=== Enhanced Image Analysis Report ===\n")
+                    f.write(f"Combined similarity: {final_image_similarity:.2f}%\n")
+                    f.write(f"Structural similarity: {enhanced_analysis['gray_similarity']:.2f}%\n")
+                    f.write(f"Color similarity: {enhanced_analysis['color_similarity']:.2f}%\n")
+                    f.write(f"Text similarity: {text_sim:.2f}%\n")
+                    f.write(f"Main difference type: {enhanced_analysis['main_difference_type']}\n")
+                    f.write(f"Significant color differences: {'Yes' if enhanced_analysis['is_significant_color_difference'] else 'No'}\n")
+                    f.write(f"Hue difference: {hsv['h']:.1f}°\n")
+                    f.write(f"RGB differences: R={rgb['r']:.1f}, G={rgb['g']:.1f}, B={rgb['b']:.1f}\n")
+                
+                print(f"Enhanced results saved to: {output_dir}")
         else:
-            print(f"Text comparison failed: {text_comparison['error']}")         
+            print(f"Text comparison failed: {text_comparison['error']}")
             
     except Exception as e:
         print(f"Error occurred during processing: {str(e)}")
         print("Please check image format and content")
         import traceback
         traceback.print_exc()
-
-
+        
 if __name__ == "__main__":
     main()
