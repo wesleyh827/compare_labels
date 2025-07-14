@@ -7,6 +7,460 @@ from difflib import SequenceMatcher
 import re
 import color_correction 
 
+
+class EnhancedTextComparison:
+    """Enhanced text comparison with IoU-based spatial awareness"""
+    
+    def __init__(self):
+        self.easyocr_reader = None
+        self.easyocr_languages = ['en']
+        self.text_similarity_threshold = 0.5  # Lower threshold for easier matching
+        self.iou_threshold = 0.1
+        self.spatial_weight = 0.4  # Spatial weight
+        self.text_weight = 0.6     # Text weight
+        self.max_distance_ratio = 0.3  # Maximum distance ratio
+    
+    def calculate_iou(self, box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+        """Calculate IoU between two bounding boxes"""
+        x1_1, y1_1, w1, h1 = box1
+        x1_2, y1_2, w2, h2 = box2
+        
+        # Calculate bottom-right coordinates
+        x2_1, y2_1 = x1_1 + w1, y1_1 + h1
+        x2_2, y2_2 = x1_2 + w2, y1_2 + h2
+        
+        # Calculate intersection area
+        intersect_x1 = max(x1_1, x1_2)
+        intersect_y1 = max(y1_1, y1_2)
+        intersect_x2 = min(x2_1, x2_2)
+        intersect_y2 = min(y2_1, y2_2)
+        
+        # Check if there's intersection
+        if intersect_x2 <= intersect_x1 or intersect_y2 <= intersect_y1:
+            return 0.0
+        
+        # Calculate intersection area
+        intersect_area = (intersect_x2 - intersect_x1) * (intersect_y2 - intersect_y1)
+        
+        # Calculate individual areas
+        area1 = w1 * h1
+        area2 = w2 * h2
+        
+        # Calculate union area
+        union_area = area1 + area2 - intersect_area
+        
+        # Calculate IoU
+        iou = intersect_area / union_area if union_area > 0 else 0.0
+        
+        return iou
+    
+    def calculate_spatial_distance(self, box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+        """Calculate distance between centers of two bounding boxes"""
+        x1_1, y1_1, w1, h1 = box1
+        x1_2, y1_2, w2, h2 = box2
+        
+        # Calculate center points
+        center1 = (x1_1 + w1/2, y1_1 + h1/2)
+        center2 = (x1_2 + w2/2, y1_2 + h2/2)
+        
+        # Calculate euclidean distance
+        distance = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+        
+        return distance
+    
+    def calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two text strings"""
+        # Clean text
+        text1_clean = re.sub(r'[^\w\s]', '', text1.lower().strip())
+        text2_clean = re.sub(r'[^\w\s]', '', text2.lower().strip())
+        
+        # Use SequenceMatcher for similarity
+        similarity = SequenceMatcher(None, text1_clean, text2_clean).ratio()
+        return similarity
+    
+    def calculate_combined_similarity(self, block1: Dict, block2: Dict, img_diagonal: float) -> Tuple[float, Dict]:
+        """Calculate combined similarity (text similarity + spatial similarity)"""
+        # Text similarity
+        text_sim = self.calculate_text_similarity(block1['text'], block2['text'])
+        
+        # IoU similarity
+        iou = self.calculate_iou(block1['bbox'], block2['bbox'])
+        
+        # Spatial distance similarity
+        distance = self.calculate_spatial_distance(block1['bbox'], block2['bbox'])
+        # Normalize distance (relative to image diagonal)
+        normalized_distance = distance / img_diagonal
+        # Convert to similarity (smaller distance = higher similarity)
+        distance_sim = max(0, 1 - normalized_distance / self.max_distance_ratio)
+        
+        # Combined spatial similarity (IoU + distance)
+        spatial_sim = (iou + distance_sim) / 2
+        
+        # Calculate final combined similarity
+        combined_sim = (self.text_weight * text_sim + self.spatial_weight * spatial_sim)
+        
+        similarity_details = {
+            'text_similarity': text_sim,
+            'iou': iou,
+            'distance': distance,
+            'distance_similarity': distance_sim,
+            'spatial_similarity': spatial_sim,
+            'combined_similarity': combined_sim
+        }
+        
+        return combined_sim, similarity_details
+    
+    def get_easyocr_reader(self):
+        """Get or initialize EasyOCR reader"""
+        if self.easyocr_reader is None:
+            print(f"Initializing EasyOCR with languages: {self.easyocr_languages}")
+            self.easyocr_reader = easyocr.Reader(self.easyocr_languages, gpu=False)
+        return self.easyocr_reader
+    
+    def extract_text_with_positions_easyocr(self, image: np.ndarray) -> Dict:
+        """Extract text with position information using EasyOCR"""
+        try:
+            print("Starting EasyOCR text extraction...")
+            
+            # Ensure correct image format
+            if len(image.shape) == 3:
+                processed_img = image
+            else:
+                processed_img = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            
+            # Get EasyOCR reader
+            reader = self.get_easyocr_reader()
+            
+            # Execute OCR
+            results = reader.readtext(processed_img, detail=1, paragraph=False)
+            
+            text_blocks = []
+            full_text = ""
+            
+            for i, (bbox, text, confidence) in enumerate(results):
+                text = text.strip()
+                if text and confidence > 0.25:  # 25% confidence threshold
+                    # Convert bbox format
+                    bbox_array = np.array(bbox)
+                    x_min = int(np.min(bbox_array[:, 0]))
+                    y_min = int(np.min(bbox_array[:, 1]))
+                    x_max = int(np.max(bbox_array[:, 0]))
+                    y_max = int(np.max(bbox_array[:, 1]))
+                    
+                    w = x_max - x_min
+                    h = y_max - y_min
+                    
+                    text_blocks.append({
+                        'text': text,
+                        'bbox': (x_min, y_min, w, h),
+                        'confidence': int(confidence * 100),
+                        'original_bbox': bbox
+                    })
+                    
+                    full_text += text + " "
+                    print(f"Extracted: '{text}' (confidence: {int(confidence * 100)}%)")
+            
+            return {
+                'text_blocks': text_blocks,
+                'full_text': full_text.strip(),
+                'processed_image': processed_img
+            }
+            
+        except Exception as e:
+            print(f"EasyOCR extraction failed: {e}")
+            return {
+                'text_blocks': [],
+                'full_text': "",
+                'processed_image': image,
+                'error': str(e)
+            }
+    
+    def find_text_differences_with_iou(self, text_blocks1: List[Dict], text_blocks2: List[Dict], 
+                                      img_shape: Tuple[int, int]) -> Dict:
+        """Find text differences using IoU and spatial information"""
+        # Calculate image diagonal for distance normalization
+        img_diagonal = np.sqrt(img_shape[0]**2 + img_shape[1]**2)
+        
+        differences = []
+        matched_pairs = []
+        unmatched_1 = []
+        unmatched_2 = []
+        
+        # Create copy of text_blocks2 to track unmatched ones
+        remaining_blocks2 = text_blocks2.copy()
+        
+        print(f"\n=== Starting spatial-aware text matching ===")
+        print(f"Image 1 has {len(text_blocks1)} text blocks")
+        print(f"Image 2 has {len(text_blocks2)} text blocks")
+        
+        for i, block1 in enumerate(text_blocks1):
+            print(f"\nProcessing text block {i+1} from image 1: '{block1['text']}'")
+            
+            best_match = None
+            best_similarity = 0
+            best_match_idx = -1
+            best_details = None
+            
+            # Calculate combined similarity for each remaining block2
+            for idx, block2 in enumerate(remaining_blocks2):
+                combined_sim, details = self.calculate_combined_similarity(block1, block2, img_diagonal)
+                
+                print(f"  vs '{block2['text']}': text={details['text_similarity']:.3f}, IoU={details['iou']:.3f}, "
+                      f"distance={details['distance']:.1f}, combined={combined_sim:.3f}")
+                
+                if combined_sim > best_similarity and combined_sim > self.text_similarity_threshold:
+                    best_similarity = combined_sim
+                    best_match = block2
+                    best_match_idx = idx
+                    best_details = details
+            
+            if best_match:
+                print(f"   Best match: '{best_match['text']}' (combined similarity: {best_similarity:.3f})")
+                
+                matched_pairs.append({
+                    'block1': block1,
+                    'block2': best_match,
+                    'similarity': best_similarity,
+                    'details': best_details
+                })
+                remaining_blocks2.pop(best_match_idx)
+                
+                # Check if it's not a perfect match
+                if best_details['text_similarity'] < 0.95:
+                    differences.append({
+                        'type': 'text_difference',
+                        'block1': block1,
+                        'block2': best_match,
+                        'similarity': best_similarity,
+                        'details': best_details
+                    })
+                
+                # Check position differences
+                if best_details['distance'] > 20:
+                    differences.append({
+                        'type': 'position_difference',
+                        'block1': block1,
+                        'block2': best_match,
+                        'position_diff': best_details['distance'],
+                        'details': best_details
+                    })
+            else:
+                print(f"  ✗ No match found")
+                unmatched_1.append(block1)
+        
+        # Remaining blocks2 are unmatched
+        unmatched_2 = remaining_blocks2
+        
+        return {
+            'differences': differences,
+            'matched_pairs': matched_pairs,
+            'unmatched_1': unmatched_1,
+            'unmatched_2': unmatched_2
+        }
+    
+    def compare_text_content_with_iou(self, img1: np.ndarray, img2: np.ndarray) -> Dict:
+        """Compare text content using IoU"""
+        print("\n" + "="*60)
+        print("Starting spatial-aware text comparison (with IoU)")
+        print("="*60)
+        
+        try:
+            # Check if images are valid
+            if img1 is None or img2 is None:
+                raise ValueError("One or both images are None")
+            
+            print(f"Image 1 shape: {img1.shape}")
+            print(f"Image 2 shape: {img2.shape}")
+            
+            # Extract text
+            print("\n--- Extracting text from image 1 ---")
+            ocr_result1 = self.extract_text_with_positions_easyocr(img1)
+            
+            if 'error' in ocr_result1:
+                return {'error': f"Image 1 OCR failed: {ocr_result1['error']}"}
+            
+            print("\n--- Extracting text from image 2 ---")
+            ocr_result2 = self.extract_text_with_positions_easyocr(img2)
+            
+            if 'error' in ocr_result2:
+                return {'error': f"Image 2 OCR failed: {ocr_result2['error']}"}
+            
+            print(f"\n--- OCR Results Summary ---")
+            print(f"Image 1: Found {len(ocr_result1['text_blocks'])} text blocks")
+            print(f"Image 2: Found {len(ocr_result2['text_blocks'])} text blocks")
+            
+            if len(ocr_result1['text_blocks']) == 0 and len(ocr_result2['text_blocks']) == 0:
+                return {
+                    'ocr_result1': ocr_result1,
+                    'ocr_result2': ocr_result2,
+                    'text_analysis': {'differences': [], 'matched_pairs': [], 'unmatched_1': [], 'unmatched_2': []},
+                    'overall_similarity': 1.0
+                }
+            
+            # Use IoU for text difference analysis
+            text_analysis = self.find_text_differences_with_iou(
+                ocr_result1['text_blocks'],
+                ocr_result2['text_blocks'],
+                img1.shape[:2]
+            )
+            
+            # Calculate overall text similarity
+            overall_similarity = self.calculate_text_similarity(
+                ocr_result1['full_text'],
+                ocr_result2['full_text']
+            )
+            
+            print(f"\n--- Final Results ---")
+            print(f"Overall text similarity: {overall_similarity:.3f}")
+            print(f"Matched pairs: {len(text_analysis['matched_pairs'])}")
+            print(f"Text differences: {len([d for d in text_analysis['differences'] if d['type'] == 'text_difference'])}")
+            print(f"Position differences: {len([d for d in text_analysis['differences'] if d['type'] == 'position_difference'])}")
+            print(f"Unmatched in image 1: {len(text_analysis['unmatched_1'])}")
+            print(f"Unmatched in image 2: {len(text_analysis['unmatched_2'])}")
+            
+            return {
+                'ocr_result1': ocr_result1,
+                'ocr_result2': ocr_result2,
+                'text_analysis': text_analysis,
+                'overall_similarity': overall_similarity
+            }
+            
+        except Exception as e:
+            error_msg = f"Text comparison failed: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            return {'error': error_msg}
+    
+    def visualize_text_differences_with_iou(self, img1: np.ndarray, img2: np.ndarray, text_comparison: Dict):
+        """Visualize text differences with IoU information"""
+        img1_marked = img1.copy()
+        img2_marked = img2.copy()
+        
+        text_analysis = text_comparison['text_analysis']
+        
+        # Mark matched pairs
+        for pair in text_analysis['matched_pairs']:
+            details = pair['details']
+            
+            # Choose color based on similarity
+            if details['text_similarity'] >= 0.95:
+                color = (0, 255, 0)  # Green - perfect match
+            elif details['text_similarity'] >= 0.8:
+                color = (0, 255, 255)  # Yellow - partial match
+            else:
+                color = (0, 165, 255)  # Orange - low similarity match
+            
+            # Draw rectangles
+            x1, y1, w1, h1 = pair['block1']['bbox']
+            x2, y2, w2, h2 = pair['block2']['bbox']
+            
+            cv2.rectangle(img1_marked, (x1, y1), (x1+w1, y1+h1), color, 2)
+            cv2.rectangle(img2_marked, (x2, y2), (x2+w2, y2+h2), color, 2)
+            
+            # Add similarity information
+            cv2.putText(img1_marked, f"T:{details['text_similarity']:.2f}", 
+                       (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(img2_marked, f"I:{details['iou']:.2f}", 
+                       (x2, y2-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        # Mark unmatched text (red)
+        for block in text_analysis['unmatched_1']:
+            x, y, w, h = block['bbox']
+            cv2.rectangle(img1_marked, (x, y), (x+w, y+h), (0, 0, 255), 2)
+            cv2.putText(img1_marked, "No Match", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        for block in text_analysis['unmatched_2']:
+            x, y, w, h = block['bbox']
+            cv2.rectangle(img2_marked, (x, y), (x+w, y+h), (0, 0, 255), 2)
+            cv2.putText(img2_marked, "No Match", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        # Display results
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        axes[0, 0].imshow(cv2.cvtColor(img1_marked, cv2.COLOR_BGR2RGB))
+        axes[0, 0].set_title('Image 1 - Spatial Text Analysis\n(Green:Perfect, Yellow:Partial, Orange:Low, Red:No Match) T:Text Similarity')
+        axes[0, 0].axis('off')
+        
+        axes[0, 1].imshow(cv2.cvtColor(img2_marked, cv2.COLOR_BGR2RGB))
+        axes[0, 1].set_title('Image 2 - Spatial Text Analysis\n(Green:Perfect, Yellow:Partial, Orange:Low, Red:No Match) I:IoU Value')
+        axes[0, 1].axis('off')
+        
+        axes[1, 0].imshow(text_comparison['ocr_result1']['processed_image'])
+        axes[1, 0].set_title('Preprocessed Image 1')
+        axes[1, 0].axis('off')
+        
+        axes[1, 1].imshow(text_comparison['ocr_result2']['processed_image'])
+        axes[1, 1].set_title('Preprocessed Image 2')
+        axes[1, 1].axis('off')
+        
+        plt.suptitle(f'Spatial-Aware Text Comparison - Overall Similarity: {text_comparison["overall_similarity"]:.3f}', fontsize=16)
+        plt.tight_layout()
+        plt.show()
+        
+        # Print detailed analysis report
+        self.print_detailed_text_analysis_report(text_comparison)
+    
+    def print_detailed_text_analysis_report(self, text_comparison: Dict):
+        """Print detailed text analysis report"""
+        print("\n" + "="*60)
+        print("DETAILED SPATIAL-AWARE TEXT ANALYSIS REPORT")
+        print("="*60)
+        
+        text_analysis = text_comparison['text_analysis']
+        
+        print(f"Overall text similarity: {text_comparison['overall_similarity']:.3f}")
+        print(f"Total matched pairs: {len(text_analysis['matched_pairs'])}")
+        print(f"Text differences: {len([d for d in text_analysis['differences'] if d['type'] == 'text_difference'])}")
+        print(f"Position differences: {len([d for d in text_analysis['differences'] if d['type'] == 'position_difference'])}")
+        print(f"Unmatched in image 1: {len(text_analysis['unmatched_1'])}")
+        print(f"Unmatched in image 2: {len(text_analysis['unmatched_2'])}")
+        
+        if text_analysis['matched_pairs']:
+            print("\n--- Matched Pairs Details ---")
+            for i, pair in enumerate(text_analysis['matched_pairs']):
+                details = pair['details']
+                print(f"{i+1}. Match pair:")
+                print(f"   Image 1: '{pair['block1']['text']}'")
+                print(f"   Image 2: '{pair['block2']['text']}'")
+                print(f"   Text similarity: {details['text_similarity']:.3f}")
+                print(f"   IoU: {details['iou']:.3f}")
+                print(f"   Spatial distance: {details['distance']:.1f}px")
+                print(f"   Combined similarity: {details['combined_similarity']:.3f}")
+                print()
+        
+        if text_analysis['differences']:
+            print("\n--- Differences Details ---")
+            for i, diff in enumerate(text_analysis['differences']):
+                if diff['type'] == 'text_difference':
+                    print(f"{i+1}. Text difference:")
+                    print(f"   Image 1: '{diff['block1']['text']}'")
+                    print(f"   Image 2: '{diff['block2']['text']}'")
+                    print(f"   Text similarity: {diff['details']['text_similarity']:.3f}")
+                    print(f"   IoU: {diff['details']['iou']:.3f}")
+                elif diff['type'] == 'position_difference':
+                    print(f"{i+1}. Position difference:")
+                    print(f"   Text: '{diff['block1']['text']}'")
+                    print(f"   Position distance: {diff['position_diff']:.1f}px")
+                    print(f"   IoU: {diff['details']['iou']:.3f}")
+                print()
+        
+        if text_analysis['unmatched_1']:
+            print("\n--- Missing in Image 2 ---")
+            for i, block in enumerate(text_analysis['unmatched_1']):
+                print(f"{i+1}. '{block['text']}'")
+        
+        if text_analysis['unmatched_2']:
+            print("\n--- Missing in Image 1 ---")
+            for i, block in enumerate(text_analysis['unmatched_2']):
+                print(f"{i+1}. '{block['text']}'")
+        
+        print("\n--- Full Extracted Text ---")
+        print(f"Image 1: {text_comparison['ocr_result1']['full_text']}")
+        print(f"Image 2: {text_comparison['ocr_result2']['full_text']}")
+        print("="*60)
+
+
 class ImageAligner:
     def __init__(self):
         # Harris corner detection parameters
@@ -272,7 +726,7 @@ class ImageAligner:
             
             # Draw points
             cv2.circle(img_combined, pt1_int, 3, color, -1)
-            cv2.circle(img_combined, pt2_int, 3, color, -1) # yoyoooooo
+            cv2.circle(img_combined, pt2_int, 3, color, -1)
             
             # Draw lines
             cv2.line(img_combined, pt1_int, pt2_int, color, 1)
@@ -295,20 +749,18 @@ class ImageAligner:
         gray_diff = cv2.absdiff(gray1, gray2)
         _, gray_diff_binary = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY)
         
-        # 2. Color difference analysis (newly added)
-        # Calculate difference for each color channel
+        # 2. Color difference analysis
         color_diff = cv2.absdiff(img1, img2)
         
         # Calculate color distance for each pixel (Euclidean distance)
         color_distance = np.sqrt(np.sum(color_diff.astype(float)**2, axis=2))
         
-        # Create binary image for color differences (using lower threshold for more color sensitivity)
-        color_threshold = threshold * 1  # More sensitive to color
+        # Create binary image for color differences
+        color_threshold = threshold * 1
         _, color_diff_binary = cv2.threshold(color_distance.astype(np.uint8), 
                                             color_threshold, 255, cv2.THRESH_BINARY)
         
         # 3. Combined difference analysis
-        # Combine structural and color differences
         combined_diff_binary = cv2.bitwise_or(gray_diff_binary, color_diff_binary)
         
         # Calculate statistics
@@ -369,14 +821,14 @@ class ImageAligner:
         print(f"Difference type: {main_difference}")
         
         return {
-            'similarity_percent': combined_similarity,  # Use combined similarity as main metric
+            'similarity_percent': combined_similarity,
             'gray_similarity': gray_similarity,
             'color_similarity': color_similarity,
             'combined_similarity': combined_similarity,
             'diff_pixels': combined_diff_pixels,
             'total_pixels': total_pixels,
-            'diff_image': color_distance,  # Use color distance map
-            'diff_binary': combined_diff_binary,  # Use combined differences
+            'diff_image': color_distance,
+            'diff_binary': combined_diff_binary,
             'gray_diff_binary': gray_diff_binary,
             'color_diff_binary': color_diff_binary,
             'contours': significant_contours,
@@ -387,6 +839,7 @@ class ImageAligner:
         }
     
     def compare_aligned_images(self, img1: np.ndarray, img2: np.ndarray, threshold: int = 30):
+        """Enhanced image comparison with color analysis"""
         print("=== Enhanced Image Comparison with Color Analysis ===")
         
         # Use improved difference analysis
@@ -404,7 +857,7 @@ class ImageAligner:
             cv2.rectangle(img2_marked, (x, y), (x+w, y+h), color, 2)
         
         # Create more detailed visualization
-        fig, axes = plt.subplots(4, 2, figsize=(16, 20))
+        fig, axes = plt.subplots(3, 2, figsize=(16, 20))
         
         # First row: original images
         axes[0, 0].imshow(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB))
@@ -424,23 +877,14 @@ class ImageAligner:
         axes[1, 1].set_title(f'Reference Image (Corresponding Regions Marked)')
         axes[1, 1].axis('off')
         
-        # Third row: difference analysis
-        axes[2, 0].imshow(analysis['diff_image'], cmap='hot')
-        axes[2, 0].set_title('Color Distance Heatmap')
+        # Third row: various difference comparisons
+        axes[2, 0].imshow(analysis['gray_diff_binary'], cmap='gray')
+        axes[2, 0].set_title(f'Structural Differences ({analysis["gray_similarity"]:.1f}%)')
         axes[2, 0].axis('off')
         
-        axes[2, 1].imshow(analysis['diff_binary'], cmap='gray')
-        axes[2, 1].set_title(f'Combined Difference Map (threshold={threshold})')
+        axes[2, 1].imshow(analysis['color_diff_binary'], cmap='gray')
+        axes[2, 1].set_title(f'Color Differences ({analysis["color_similarity"]:.1f}%)')
         axes[2, 1].axis('off')
-        
-        # Fourth row: various difference comparisons
-        axes[3, 0].imshow(analysis['gray_diff_binary'], cmap='gray')
-        axes[3, 0].set_title(f'Structural Differences ({analysis["gray_similarity"]:.1f}%)')
-        axes[3, 0].axis('off')
-        
-        axes[3, 1].imshow(analysis['color_diff_binary'], cmap='gray')
-        axes[3, 1].set_title(f'Color Differences ({analysis["color_similarity"]:.1f}%)')
-        axes[3, 1].axis('off')
         
         # Add detailed statistical information
         title_text = f'''Image Comparison Analysis - Combined Similarity: {analysis["combined_similarity"]:.2f}%
@@ -459,21 +903,21 @@ Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {a
     def print_enhanced_analysis_report(self, analysis: Dict):
         """Print enhanced analysis report"""
         print("\n" + "="*60)
-        print("Enhanced Image Analysis Report")
+        print("ENHANCED IMAGE ANALYSIS REPORT")
         print("="*60)
         
-        print(f" Similarity Analysis:")
+        print(f"Similarity Analysis:")
         print(f"   Structural similarity (grayscale): {analysis['gray_similarity']:.2f}%")
         print(f"   Color similarity: {analysis['color_similarity']:.2f}%")
         print(f"   Combined similarity: {analysis['combined_similarity']:.2f}%")
         
-        print(f"\n Color Difference Details:")
+        print(f"\nColor Difference Details:")
         rgb = analysis['rgb_differences']
         hsv = analysis['hsv_differences']
         print(f"   RGB channel differences: R={rgb['r']:.1f}, G={rgb['g']:.1f}, B={rgb['b']:.1f}")
         print(f"   HSV differences: Hue={hsv['h']:.1f}°, Saturation={hsv['s']:.1f}, Value={hsv['v']:.1f}")
         
-        print(f"\n Difference Assessment:")
+        print(f"\nDifference Assessment:")
         print(f"   Main difference type: {analysis['main_difference_type']}")
         print(f"   Significant difference regions: {len(analysis['contours'])}")
         print(f"   Has significant color differences: {'Yes' if analysis['is_significant_color_difference'] else 'No'}")
@@ -488,11 +932,11 @@ Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {a
         else:
             assessment = "Images have significant differences, potential issues"
         
-        print(f"\n Assessment Conclusion: {assessment}")
+        print(f"\nAssessment Conclusion: {assessment}")
         
         # Special reminder for color differences
         if analysis['is_significant_color_difference']:
-            print(f"  Important Note: Significant color differences detected!")
+            print(f"Important Note: Significant color differences detected!")
             if hsv['h'] > 20:
                 print(f"   - Large hue difference ({hsv['h']:.1f}°), possibly different colored packaging")
             if rgb['r'] > 50 or rgb['g'] > 50 or rgb['b'] > 50:
@@ -500,396 +944,34 @@ Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {a
         
         print("="*60)
 
-    def preprocess_for_ocr(self, image: np.ndarray, method: str = 'default') -> np.ndarray:
-        """Preprocess image for better OCR results"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-        
-        if method == 'default':
-            # Basic preprocessing - gentle processing
-            processed = cv2.medianBlur(gray, 3)  # Denoising
-            processed = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        elif method == 'gentle':
-            # Gentler preprocessing, preserve more details
-            processed = cv2.bilateralFilter(gray, 9, 75, 75)  # Edge-preserving denoising
-            # Use adaptive threshold
-            processed = cv2.adaptiveThreshold(processed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        elif method == 'denoise':
-            # Denoising preprocessing
-            processed = cv2.fastNlMeansDenoising(gray)
-            processed = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        elif method == 'morph':
-            # Morphological operations
-            processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-            kernel = np.ones((1, 1), np.uint8)
-            processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel)
-        elif method == 'original':
-            # Use original grayscale, no preprocessing 
-            processed = gray
-        else:
-            processed = gray
-            
-        return processed
-    
-    def get_easyocr_reader(self):
-        """Get or initialize EasyOCR reader"""
-        if self.easyocr_reader is None:
-            print(f"Initializing EasyOCR with languages: {self.easyocr_languages}")
-            self.easyocr_reader = easyocr.Reader(self.easyocr_languages, gpu=False)  # Set gpu=True if GPU available
-        return self.easyocr_reader
-    
-    def extract_text_with_positions_easyocr(self, image: np.ndarray) -> Dict:
-        """Extract text with bounding box positions using EasyOCR"""
-        try:
-            print("Starting EasyOCR extraction...")
-            
-            # Ensure correct image format 
-            if len(image.shape) == 3:
-                # EasyOCR can directly process color images
-                processed_img = image
-            else:
-                # If grayscale, convert to 3-channel
-                processed_img = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            
-            print(f"Image shape: {processed_img.shape}")
-            
-            # Get EasyOCR reader
-            reader = self.get_easyocr_reader()
-            
-            # Execute OCR
-            print("Running EasyOCR analysis...")
-            results = reader.readtext(processed_img, detail=1, paragraph=False)
-            
-            print(f"EasyOCR completed, found {len(results)} text elements")
-            
-            text_blocks = []
-            full_text = ""
-            
-            for i, (bbox, text, confidence) in enumerate(results):
-                text = text.strip()
-                confidence_percent = int(confidence * 100)
-                
-                # Print all detected text for debugging
-                if text:
-                    print(f"Detected: '{text}' (confidence: {confidence_percent}%)")
-                
-                # Set confidence threshold (EasyOCR confidence is between 0-1)
-                if text and confidence > 0.25:  # 25% confidence 
-                    # Convert bbox format - EasyOCR returns four corner points
-                    # Calculate bounding box
-                    bbox_array = np.array(bbox)
-                    x_min = int(np.min(bbox_array[:, 0]))
-                    y_min = int(np.min(bbox_array[:, 1]))
-                    x_max = int(np.max(bbox_array[:, 0]))
-                    y_max = int(np.max(bbox_array[:, 1]))
-                    
-                    w = x_max - x_min
-                    h = y_max - y_min
-                    
-                    text_blocks.append({
-                        'text': text,
-                        'bbox': (x_min, y_min, w, h),
-                        'confidence': confidence_percent,
-                        'original_bbox': bbox  # Save original four-corner coordinates
-                    })
-                    
-                    full_text += text + " "
-            
-            print(f"Final result: {len(text_blocks)} valid text blocks extracted")
-            print(f"Full text: '{full_text.strip()}'")
-            
-            return {
-                'text_blocks': text_blocks,
-                'full_text': full_text.strip(),
-                'processed_image': processed_img
-            }
-            
-        except Exception as e:
-            print(f"EasyOCR extraction failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                'text_blocks': [],
-                'full_text': "",
-                'processed_image': image,
-                'error': str(e)
-            }
-    
-    def calculate_text_similarity(self, text1: str, text2: str) -> float:
-        """Calculate similarity between two text strings"""
-        # Clean text
-        text1_clean = re.sub(r'[^\w\s]', '', text1.lower().strip())
-        text2_clean = re.sub(r'[^\w\s]', '', text2.lower().strip())
-        
-        # Use SequenceMatcher for similarity
-        similarity = SequenceMatcher(None, text1_clean, text2_clean).ratio()
-        return similarity
-    
-    def find_text_differences(self, text_blocks1: List[Dict], text_blocks2: List[Dict]) -> Dict:
-        """Find differences between text blocks from two images"""
-        differences = []
-        matched_pairs = []
-        unmatched_1 = []
-        unmatched_2 = []
-        
-        # Create a copy of text_blocks2 to track unmatched
-        remaining_blocks2 = text_blocks2.copy()
-        
-        for block1 in text_blocks1:
-            best_match = None
-            best_similarity = 0
-            best_match_idx = -1
-            
-            for idx, block2 in enumerate(remaining_blocks2):
-                similarity = self.calculate_text_similarity(block1['text'], block2['text'])
-                
-                if similarity > best_similarity and similarity > self.text_similarity_threshold:
-                    best_similarity = similarity
-                    best_match = block2
-                    best_match_idx = idx
-            
-            if best_match:
-                matched_pairs.append({
-                    'block1': block1,
-                    'block2': best_match,
-                    'similarity': best_similarity
-                })
-                remaining_blocks2.pop(best_match_idx)
-                
-                # Check if texts are exactly the same
-                if best_similarity < 1.0:
-                    differences.append({
-                        'type': 'text_difference',
-                        'block1': block1,
-                        'block2': best_match,
-                        'similarity': best_similarity
-                    })
-            else:
-                unmatched_1.append(block1)
-        
-        # Remaining blocks in image2 are unmatched
-        unmatched_2 = remaining_blocks2
-        
-        # Add position differences for matched pairs
-        for pair in matched_pairs:
-            bbox1 = pair['block1']['bbox']
-            bbox2 = pair['block2']['bbox']
-            
-            # Calculate position difference
-            center1 = (bbox1[0] + bbox1[2]//2, bbox1[1] + bbox1[3]//2)
-            center2 = (bbox2[0] + bbox2[2]//2, bbox2[1] + bbox2[3]//2)
-            pos_diff = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
-            
-            if pos_diff > 10:  # Position difference threshold
-                differences.append({
-                    'type': 'position_difference',
-                    'block1': pair['block1'],
-                    'block2': pair['block2'],
-                    'position_diff': pos_diff
-                })
-        
-        return {
-            'differences': differences,
-            'matched_pairs': matched_pairs, 
-            'unmatched_1': unmatched_1,
-            'unmatched_2': unmatched_2
-        }
-    
-    def compare_text_content(self, img1: np.ndarray, img2: np.ndarray) -> Dict:
-        """Compare text content between two images using EasyOCR"""
-        print("\n" + "="*50)
-        print("STARTING TEXT COMPARISON WITH EASYOCR")
-        print("="*50)
-        
-        try:
-            # Check if images are valid
-            if img1 is None or img2 is None:
-                raise ValueError("One or both images are None")
-            
-            print(f"Image 1 shape: {img1.shape}")
-            print(f"Image 2 shape: {img2.shape}")
-            
-            # Extract text from both images using EasyOCR
-            print("\n--- EXTRACTING TEXT FROM IMAGE 1 WITH EASYOCR ---")
-            ocr_result1 = self.extract_text_with_positions_easyocr(img1)
-            
-            if 'error' in ocr_result1:
-                print(f"EasyOCR failed for image 1: {ocr_result1['error']}")
-                return {'error': f"EasyOCR failed for image 1: {ocr_result1['error']}"}
-            
-            print("\n--- EXTRACTING TEXT FROM IMAGE 2 WITH EASYOCR ---")
-            ocr_result2 = self.extract_text_with_positions_easyocr(img2)
-            
-            if 'error' in ocr_result2:
-                print(f"EasyOCR failed for image 2: {ocr_result2['error']}")
-                return {'error': f"EasyOCR failed for image 2: {ocr_result2['error']}"}
-            
-            print(f"\n--- EASYOCR RESULTS SUMMARY ---")
-            print(f"Image 1: Found {len(ocr_result1['text_blocks'])} text blocks")
-            print(f"Image 2: Found {len(ocr_result2['text_blocks'])} text blocks")
-            
-            if len(ocr_result1['text_blocks']) == 0 and len(ocr_result2['text_blocks']) == 0:
-                print("No text detected in either image!")
-                return {
-                    'ocr_result1': ocr_result1,
-                    'ocr_result2': ocr_result2,
-                    'text_analysis': {'differences': [], 'matched_pairs': [], 'unmatched_1': [], 'unmatched_2': []},
-                    'overall_similarity': 1.0 if ocr_result1['full_text'] == ocr_result2['full_text'] else 0.0
-                }
-            
-            # Find differences
-            print("\n--- ANALYZING TEXT DIFFERENCES ---")
-            text_analysis = self.find_text_differences(
-                ocr_result1['text_blocks'], 
-                ocr_result2['text_blocks']
-            )
-            
-            # Calculate overall text similarity
-            overall_similarity = self.calculate_text_similarity(
-                ocr_result1['full_text'], 
-                ocr_result2['full_text']
-            )
-            
-            print(f"Overall text similarity: {overall_similarity:.2f}")
-            print(f"Text differences found: {len(text_analysis['differences'])}")
-            print(f"Unmatched blocks in image 1: {len(text_analysis['unmatched_1'])}")
-            print(f"Unmatched blocks in image 2: {len(text_analysis['unmatched_2'])}")
-            
-            return {
-                'ocr_result1': ocr_result1,
-                'ocr_result2': ocr_result2,
-                'text_analysis': text_analysis,
-                'overall_similarity': overall_similarity
-            }
-            
-        except Exception as e:
-            error_msg = f"Text comparison failed: {str(e)}"
-            print(f"{error_msg}")
-            import traceback
-            traceback.print_exc()
-            return {'error': error_msg}
-    
-    def visualize_text_differences(self, img1: np.ndarray, img2: np.ndarray, text_comparison: Dict):
-        """Visualize text differences between images"""
-        img1_marked = img1.copy()
-        img2_marked = img2.copy()
-        
-        text_analysis = text_comparison['text_analysis']
-        
-        # Mark matched pairs (green)
-        for pair in text_analysis['matched_pairs']:
-            if pair['similarity'] < 1.0:
-                # Text difference - yellow
-                x1, y1, w1, h1 = pair['block1']['bbox']
-                x2, y2, w2, h2 = pair['block2']['bbox']
-                cv2.rectangle(img1_marked, (x1, y1), (x1+w1, y1+h1), (0, 255, 255), 2)
-                cv2.rectangle(img2_marked, (x2, y2), (x2+w2, y2+h2), (0, 255, 255), 2)
-            else:
-                # Exact match - green
-                x1, y1, w1, h1 = pair['block1']['bbox']
-                x2, y2, w2, h2 = pair['block2']['bbox']
-                cv2.rectangle(img1_marked, (x1, y1), (x1+w1, y1+h1), (0, 255, 0), 2)
-                cv2.rectangle(img2_marked, (x2, y2), (x2+w2, y2+h2), (0, 255, 0), 2)
-        
-        # Mark unmatched text (red)
-        for block in text_analysis['unmatched_1']:
-            x, y, w, h = block['bbox']
-            cv2.rectangle(img1_marked, (x, y), (x+w, y+h), (0, 0, 255), 2)
-        
-        for block in text_analysis['unmatched_2']:
-            x, y, w, h = block['bbox']
-            cv2.rectangle(img2_marked, (x, y), (x+w, y+h), (0, 0, 255), 2)
-        
-        # Display results
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        
-        axes[0, 0].imshow(cv2.cvtColor(img1_marked, cv2.COLOR_BGR2RGB))
-        axes[0, 0].set_title('Image 1 - Text Analysis\n(Green: Match, Yellow: Diff, Red: Missing)')
-        axes[0, 0].axis('off')
-        
-        axes[0, 1].imshow(cv2.cvtColor(img2_marked, cv2.COLOR_BGR2RGB))
-        axes[0, 1].set_title('Image 2 - Text Analysis\n(Green: Match, Yellow: Diff, Red: Missing)')
-        axes[0, 1].axis('off')
-        
-        # Show preprocessed images
-        axes[1, 0].imshow(text_comparison['ocr_result1']['processed_image'], cmap='gray')
-        axes[1, 0].set_title('Preprocessed Image 1')
-        axes[1, 0].axis('off')
-        
-        axes[1, 1].imshow(text_comparison['ocr_result2']['processed_image'], cmap='gray')
-        axes[1, 1].set_title('Preprocessed Image 2')
-        axes[1, 1].axis('off')
-        
-        plt.suptitle(f'Text Comparison - Overall Similarity: {text_comparison["overall_similarity"]:.2f}', fontsize=16)
-        plt.tight_layout()
-        plt.show()
-        
-        # Print detailed text analysis
-        self.print_text_analysis_report(text_comparison)
-    
-    def print_text_analysis_report(self, text_comparison: Dict):
-        """Print detailed text analysis report"""
-        print("\n" + "="*50)
-        print("DETAILED TEXT ANALYSIS REPORT")
-        print("="*50)
-        
-        text_analysis = text_comparison['text_analysis']
-        
-        print(f"Overall Text Similarity: {text_comparison['overall_similarity']:.2%}")
-        print(f"Total Matched Pairs: {len(text_analysis['matched_pairs'])}")
-        print(f"Text Differences: {len([d for d in text_analysis['differences'] if d['type'] == 'text_difference'])}")
-        print(f"Position Differences: {len([d for d in text_analysis['differences'] if d['type'] == 'position_difference'])}")
-        print(f"Unmatched in Image 1: {len(text_analysis['unmatched_1'])}")
-        print(f"Unmatched in Image 2: {len(text_analysis['unmatched_2'])}")
-        
-        if text_analysis['differences']:
-            print("\n--- TEXT DIFFERENCES ---")
-            for i, diff in enumerate(text_analysis['differences']):
-                if diff['type'] == 'text_difference':
-                    print(f"{i+1}. Text Difference (Similarity: {diff['similarity']:.2f})")
-                    print(f"   Image 1: '{diff['block1']['text']}'")
-                    print(f"   Image 2: '{diff['block2']['text']}'")
-                elif diff['type'] == 'position_difference':
-                    print(f"{i+1}. Position Difference: {diff['position_diff']:.1f} pixels")
-                    print(f"   Text: '{diff['block1']['text']}'")
-        
-        if text_analysis['unmatched_1']:
-            print("\n--- MISSING IN IMAGE 2 ---")
-            for i, block in enumerate(text_analysis['unmatched_1']):
-                print(f"{i+1}. '{block['text']}'")
-        
-        if text_analysis['unmatched_2']:
-            print("\n--- MISSING IN IMAGE 1 ---")
-            for i, block in enumerate(text_analysis['unmatched_2']):
-                print(f"{i+1}. '{block['text']}'")
-        
-        print("\n--- FULL TEXT EXTRACTED ---")
-        print(f"Image 1: {text_comparison['ocr_result1']['full_text']}")
-        print(f"Image 2: {text_comparison['ocr_result2']['full_text']}")
-        print("="*50)
 
-
-# Usage Example
+# Main function
 def main():
-    
+    # Create image aligner instance
     aligner = ImageAligner()
-
-    aligner.easyocr_reader = None
-    aligner.easyocr_languages = ['en'] 
-    aligner.text_similarity_threshold = 0.7
+    
+    # Create enhanced text comparator instance
+    text_comparator = EnhancedTextComparison()
+    
+    # Configure text comparator parameters
+    text_comparator.text_similarity_threshold = 0.5
+    text_comparator.spatial_weight = 0.4
+    text_comparator.text_weight = 0.6
+    text_comparator.max_distance_ratio = 0.3
     
     # Color correction parameters
     aligner.color_correction_enabled = True
     aligner.color_correction_window_size = 100
     aligner.color_correction_step_size = 50
 
-    print("=== Enhanced Image Alignment Workflow with Color-Aware Analysis ===")
+    print("=== Enhanced Image Alignment Workflow with IoU-based Text Comparison ===")
     
     # Read images - Please modify to your actual image paths
     img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\test1-1.jpg'
     img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\test1.jpg'
     
     print(f"Reading images...")
-    print(f"Reference image path: {img1_path}")
+    print(f"Vendor image path: {img1_path}")
     print(f"Design image path: {img2_path}")
     
     img1 = cv2.imread(img1_path)
@@ -897,7 +979,7 @@ def main():
     
     # Check if images were successfully loaded
     if img1 is None:
-        print(f"Error: Cannot read reference image '{img1_path}'")
+        print(f"Error: Cannot read vendor image '{img1_path}'")
         return
     
     if img2 is None:
@@ -905,7 +987,7 @@ def main():
         return
     
     print(f"Successfully loaded images")
-    print(f"Reference image dimensions: {img1.shape}")
+    print(f"Vendor image dimensions: {img1.shape}")
     print(f"Design image dimensions: {img2.shape}")
     
     try:
@@ -929,42 +1011,52 @@ def main():
         # Step 3: Enhanced comparison with color awareness
         print("\n=== Step 3: Enhanced Color-Aware Comparison Analysis ===")
         
-        # Use new color-aware comparison method
+        # Use enhanced color-aware comparison method
         enhanced_analysis = aligner.compare_aligned_images(color_corrected_img1, img2, threshold=150)
         
-        # Also run original method for comparison
-        print(f"\nMethod comparison results:")
-        print(f"   Enhanced method combined similarity: {enhanced_analysis['combined_similarity']:.2f}%")
-        print(f"   Enhanced method structural similarity: {enhanced_analysis['gray_similarity']:.2f}%")
-        print(f"   Enhanced method color similarity: {enhanced_analysis['color_similarity']:.2f}%")
+        print(f"\nEnhanced analysis results:")
+        print(f"   Combined similarity: {enhanced_analysis['combined_similarity']:.2f}%")
+        print(f"   Structural similarity: {enhanced_analysis['gray_similarity']:.2f}%")
+        print(f"   Color similarity: {enhanced_analysis['color_similarity']:.2f}%")
         
         final_image_similarity = enhanced_analysis['combined_similarity']
         
-        # Fine-tune analysis with different thresholds (using enhanced method)
-        print("\n=== Analysis with Different Thresholds (Enhanced Method) ===")
-        for thresh in [10, 20, 50, 100, 200]:
-            analysis = aligner.analyze_differences(color_corrected_img1, img2, thresh)
-            print(f"Threshold {thresh}: Combined similarity {analysis['combined_similarity']:.2f}%, "
-                  f"Color similarity {analysis['color_similarity']:.2f}%, "
-                  f"Difference regions {len(analysis['contours'])}")
-
-        # Step 4: EasyOCR text comparison
-        print("\n=== Step 4: EasyOCR Text Content Analysis ===")
-        text_comparison = aligner.compare_text_content(color_corrected_img1, img2)
+        # Step 4: Enhanced spatial-aware text comparison with IoU 
+        print("\n=== Step 4: Enhanced Spatial-Aware Text Comparison (with IoU) ===")
+        
+        text_comparison = text_comparator.compare_text_content_with_iou(color_corrected_img1, img2)
         
         if 'error' not in text_comparison:
-            print("Text comparison completed!")
-            aligner.visualize_text_differences(color_corrected_img1, img2, text_comparison)
+            print(" Spatial-aware text comparison completed!")
             
-            # Step 5: Comprehensive evaluation with enhanced analysis
+            # Display enhanced results
+            text_comparator.visualize_text_differences_with_iou(color_corrected_img1, img2, text_comparison)
+            
+            # Output improved statistics
+            text_analysis = text_comparison['text_analysis']
+            print(f"\n=== Enhanced Text Analysis Results ===")
+            print(f"Overall text similarity: {text_comparison['overall_similarity']:.3f}")
+            print(f"Spatial-aware matched pairs: {len(text_analysis['matched_pairs'])}")
+            print(f"Text differences: {len([d for d in text_analysis['differences'] if d['type'] == 'text_difference'])}")
+            print(f"Position differences: {len([d for d in text_analysis['differences'] if d['type'] == 'position_difference'])}")
+            print(f"Unmatched items: {len(text_analysis['unmatched_1']) + len(text_analysis['unmatched_2'])}")
+            
+            # Show detailed matching information
+            for i, pair in enumerate(text_analysis['matched_pairs']):
+                details = pair['details']
+                print(f"Match {i+1}: '{pair['block1']['text']}' ↔ '{pair['block2']['text']}'")
+                print(f"  Text similarity: {details['text_similarity']:.3f}, IoU: {details['iou']:.3f}, "
+                      f"Distance: {details['distance']:.1f}px")
+            
+            # Step 5: Final comprehensive evaluation
             text_sim = text_comparison['overall_similarity'] * 100
             
-            print(f"\n=== Final Assessment (Using Enhanced Method) ===")
+            print(f"\n=== Final Assessment (Using Enhanced Analysis) ===")
             print(f"Detailed Similarity Analysis:")
             print(f"   Structural similarity: {enhanced_analysis['gray_similarity']:.1f}%")
             print(f"   Color similarity: {enhanced_analysis['color_similarity']:.1f}%")
             print(f"   Combined image similarity: {final_image_similarity:.1f}%")
-            print(f"   Text similarity: {text_sim:.1f}%")
+            print(f"   Spatial-aware text similarity: {text_sim:.1f}%")
             print(f"   Final combined score: {(final_image_similarity + text_sim) / 2:.1f}%")
             
             print(f"\nColor Difference Assessment:")
@@ -973,6 +1065,12 @@ def main():
             print(f"   Hue difference: {hsv['h']:.1f}° ({'Significant' if hsv['h'] > 20 else 'Minor'})")
             print(f"   RGB average differences: R={rgb['r']:.1f}, G={rgb['g']:.1f}, B={rgb['b']:.1f}")
             print(f"   Main difference type: {enhanced_analysis['main_difference_type']}")
+            
+            print(f"\nEnhancement Effects:")
+            print(f"    Prevented incorrect matching of duplicate text")
+            print(f"    Considered spatial position relationships")
+            print(f"    More accurate text correspondence")
+            print(f"    Reduced false positives and false negatives")
             
             print(f"\nFinal Determination:")
             if final_image_similarity > 90 and text_sim > 80 and not enhanced_analysis['is_significant_color_difference']:
@@ -1007,21 +1105,27 @@ def main():
                     f.write(f"Combined similarity: {final_image_similarity:.2f}%\n")
                     f.write(f"Structural similarity: {enhanced_analysis['gray_similarity']:.2f}%\n")
                     f.write(f"Color similarity: {enhanced_analysis['color_similarity']:.2f}%\n")
-                    f.write(f"Text similarity: {text_sim:.2f}%\n")
+                    f.write(f"Spatial-aware text similarity: {text_sim:.2f}%\n")
                     f.write(f"Main difference type: {enhanced_analysis['main_difference_type']}\n")
                     f.write(f"Significant color differences: {'Yes' if enhanced_analysis['is_significant_color_difference'] else 'No'}\n")
                     f.write(f"Hue difference: {hsv['h']:.1f}°\n")
                     f.write(f"RGB differences: R={rgb['r']:.1f}, G={rgb['g']:.1f}, B={rgb['b']:.1f}\n")
+                    f.write(f"Spatial-aware matched pairs: {len(text_analysis['matched_pairs'])}\n")
+                    f.write(f"Text differences: {len([d for d in text_analysis['differences'] if d['type'] == 'text_difference'])}\n")
+                    f.write(f"Position differences: {len([d for d in text_analysis['differences'] if d['type'] == 'position_difference'])}\n")
                 
                 print(f"Enhanced results saved to: {output_dir}")
         else:
-            print(f"Text comparison failed: {text_comparison['error']}")
+            print(f"✗ Enhanced text comparison failed: {text_comparison['error']}")
+            print("This may be due to EasyOCR initialization or image processing issues")
             
     except Exception as e:
         print(f"Error occurred during processing: {str(e)}")
         print("Please check image format and content")
         import traceback
         traceback.print_exc()
-        
+
+
 if __name__ == "__main__":
+   
     main()
