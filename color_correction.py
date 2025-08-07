@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from collections import Counter
 import matplotlib.pyplot as plt
-from sklearn.cluster import KMeans
+
 
 def load_images(image1_path, image2_path):
     """Load two images"""
@@ -32,15 +32,48 @@ def calculate_color_uniformity(region):
     
     return uniformity_score, mean_color
 
-def find_most_uniform_region(image, window_size=50, step_size=25):
-    """Find the most uniform color region in the image"""
+def calculate_whiteness_score(color):
+    """
+    Calculate how close a color is to white
+    Returns a score between 0 and 1, where 1 is pure white
+    """
+    # Convert to 0-1 range
+    normalized_color = color / 255.0
+    
+    # Method 1: Calculate distance from white (1, 1, 1)
+    white_distance = np.sqrt(np.sum((normalized_color - 1.0) ** 2))
+    
+    # Method 2: Calculate minimum channel value (white has high values in all channels)
+    min_channel = np.min(normalized_color)
+    
+    # Method 3: Calculate how balanced the channels are (white has similar R, G, B values)
+    channel_std = np.std(normalized_color)
+    balance_score = 1 / (channel_std + 0.1)  # Higher score for more balanced colors
+    
+    # Combine all factors
+    # High minimum channel value + low distance from white + balanced channels = high whiteness
+    whiteness_score = (min_channel * 0.4 + 
+                      (1 - white_distance/np.sqrt(3)) * 0.4 + 
+                      min(balance_score/10, 1.0) * 0.2)
+    
+    return whiteness_score
+
+def find_most_uniform_region_with_white_priority(image, window_size=50, step_size=25, uniformity_threshold=0.99):
+    """
+    Find the most uniform color region in the image
+    If multiple regions have similar high uniformity (near 1), prioritize white regions
+    """
     height, width, _ = image.shape
     best_score = 0
     best_region = None
     best_position = None
     best_color = None
     
+    # Store all high uniformity regions for white priority selection
+    high_uniformity_regions = []
+    
     print(f"Search range: {height}x{width}, window size: {window_size}x{window_size}")
+    print(f"Uniformity threshold for white priority: {uniformity_threshold}")
     
     search_count = 0
     # Sliding window search
@@ -53,19 +86,80 @@ def find_most_uniform_region(image, window_size=50, step_size=25):
             uniformity, main_color = calculate_color_uniformity(region)
             search_count += 1
             
+            # Store regions with high uniformity for potential white priority
+            if uniformity >= uniformity_threshold:
+                whiteness_score = calculate_whiteness_score(main_color)
+                high_uniformity_regions.append({
+                    'uniformity': uniformity,
+                    'color': main_color.copy(),
+                    'position': (x, y, x+window_size, y+window_size),
+                    'region': region.copy(),
+                    'whiteness_score': whiteness_score
+                })
+                print(f"High uniformity region found: position({x},{y}), uniformity: {uniformity:.4f}, "
+                      f"color: RGB({main_color[0]:.1f}, {main_color[1]:.1f}, {main_color[2]:.1f}), "
+                      f"whiteness: {whiteness_score:.3f}")
+            
+            # Also keep track of the best overall uniformity
             if uniformity > best_score:
                 best_score = uniformity
                 best_region = region.copy()
                 best_position = (x, y, x+window_size, y+window_size)
                 best_color = main_color.copy()
-                print(f"Found better region: position({x},{y}), uniformity: {uniformity:.4f}, color: {main_color}")
     
     print(f"Searched {search_count} regions in total")
-    return best_region, best_position, best_color, best_score
+    print(f"Found {len(high_uniformity_regions)} high uniformity regions")
+    
+    # Decision logic: If we have multiple high uniformity regions, prioritize white
+    if len(high_uniformity_regions) > 1:
+        print("\n=== Multiple high uniformity regions found, applying white priority ===")
+        
+        # Sort by whiteness score (descending)
+        high_uniformity_regions.sort(key=lambda x: x['whiteness_score'], reverse=True)
+        
+        # Show top candidates
+        print("Top candidates (sorted by whiteness):")
+        for i, region_info in enumerate(high_uniformity_regions[:5]):  # Show top 5
+            print(f"  {i+1}. Uniformity: {region_info['uniformity']:.4f}, "
+                  f"Whiteness: {region_info['whiteness_score']:.3f}, "
+                  f"Color: RGB({region_info['color'][0]:.1f}, {region_info['color'][1]:.1f}, {region_info['color'][2]:.1f})")
+        
+        # Select the whitest region among high uniformity regions
+        selected_region = high_uniformity_regions[0]
+        
+        print(f"\n✓ Selected region based on white priority:")
+        print(f"  Position: {selected_region['position']}")
+        print(f"  Uniformity: {selected_region['uniformity']:.4f}")
+        print(f"  Whiteness score: {selected_region['whiteness_score']:.3f}")
+        print(f"  Color: RGB({selected_region['color'][0]:.1f}, {selected_region['color'][1]:.1f}, {selected_region['color'][2]:.1f})")
+        
+        return (selected_region['region'], 
+                selected_region['position'], 
+                selected_region['color'], 
+                selected_region['uniformity'])
+    
+    elif len(high_uniformity_regions) == 1:
+        print(f"\n=== Single high uniformity region found ===")
+        selected_region = high_uniformity_regions[0]
+        whiteness = selected_region['whiteness_score']
+        print(f"Uniformity: {selected_region['uniformity']:.4f}, Whiteness: {whiteness:.3f}")
+        
+        return (selected_region['region'], 
+                selected_region['position'], 
+                selected_region['color'], 
+                selected_region['uniformity'])
+    
+    else:
+        print(f"\n=== No high uniformity regions found, using best uniformity region ===")
+        print(f"Best uniformity: {best_score:.4f}")
+        print(f"Position: {best_position}")
+        print(f"Color: RGB({best_color[0]:.1f}, {best_color[1]:.1f}, {best_color[2]:.1f})")
+        
+        return best_region, best_position, best_color, best_score
 
 def calculate_rgb_adjustment(color1, color2):
     """Calculate RGB adjustment parameters"""
-    # Calculate color difference
+    # Calculate color difference 
     rgb_diff = color2 - color1
     
     # Calculate ratio adjustment (avoid division by zero)
@@ -164,7 +258,7 @@ def show_three_way_comparison(vendor_img, adjusted_img, design_img, method=''):
     original_diff = np.mean(np.abs(vendor_avg - design_avg))
     adjusted_diff = np.mean(np.abs(adjusted_avg - design_avg))
     
-    plt.suptitle(f'Color Correction Progress\n'
+    plt.suptitle(f'Color Correction Progress (White Priority Applied)\n'
                 f'Original difference: {original_diff:.1f} → Adjusted difference: {adjusted_diff:.1f}', 
                 fontsize=14)
     
@@ -190,8 +284,8 @@ def show_adjustment_comparison(original_img, adjusted_img, method=''):
     plt.tight_layout()
     plt.show()
 
-def visualize_results(img1, img2, region1, region2, position, color1, color2):
-    """Visualize results"""
+def visualize_results_with_white_info(img1, img2, region1, region2, position, color1, color2, whiteness_score1, whiteness_score2):
+    """Visualize results with whiteness information"""
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
     # Display original images
@@ -212,27 +306,29 @@ def visualize_results(img1, img2, region1, region2, position, color1, color2):
     cv2.rectangle(img2_marked, (x1, y1), (x2, y2), (255, 0, 0), 3)
     
     axes[0, 2].imshow(img1_marked)
-    axes[0, 2].set_title('Image 1 (Marked Region)')
+    axes[0, 2].set_title('Image 1 (Selected Region)')
     axes[0, 2].axis('off')
     
-    # Display extracted regions
+    # Display extracted regions with whiteness information
     axes[1, 0].imshow(region1)
-    axes[1, 0].set_title(f'Region 1\nMain Color: {color1.astype(int)}')
+    axes[1, 0].set_title(f'Region 1\nColor: RGB({color1[0]:.0f}, {color1[1]:.0f}, {color1[2]:.0f})\nWhiteness: {whiteness_score1:.3f}')
     axes[1, 0].axis('off')
     
     axes[1, 1].imshow(region2)
-    axes[1, 1].set_title(f'Region 2\nMain Color: {color2.astype(int)}')
+    axes[1, 1].set_title(f'Region 2\nColor: RGB({color2[0]:.0f}, {color2[1]:.0f}, {color2[2]:.0f})\nWhiteness: {whiteness_score2:.3f}')
     axes[1, 1].axis('off')
     
     axes[1, 2].imshow(img2_marked)
-    axes[1, 2].set_title('Image 2 (Marked Region)')
+    axes[1, 2].set_title('Image 2 (Corresponding Region)')
     axes[1, 2].axis('off')
     
+    # Add overall title indicating white priority was used
+    plt.suptitle('Color Correction Analysis (White Priority Applied)', fontsize=16, fontweight='bold')
     plt.tight_layout()
     plt.show()
 
-def main(image1_path, image2_path, window_size, step_size):
-    """Main function"""
+def main(image1_path, image2_path, window_size, step_size, uniformity_threshold=0.99):
+    """Main function with white priority"""
     print("Loading images...")
     img1, img2 = load_images(image1_path, image2_path)
     
@@ -247,15 +343,19 @@ def main(image1_path, image2_path, window_size, step_size):
         img1 = img1[:min_height, :min_width]
         img2 = img2[:min_height, :min_width]
     
-    print("Finding the most uniform color region...")
-    region1, position, color1, uniformity_score = find_most_uniform_region(
-        img1, window_size, step_size
+    print("Finding the most uniform color region with white priority...")
+    region1, position, color1, uniformity_score = find_most_uniform_region_with_white_priority(
+        img1, window_size, step_size, uniformity_threshold
     )
     
-    print(f"\nMost uniform region found:")
+    print(f"\nFinal selected region:")
     print(f"Uniformity score: {uniformity_score:.4f}")
     print(f"Region position: {position}")
     print(f"Main color: RGB({color1[0]:.1f}, {color1[1]:.1f}, {color1[2]:.1f})")
+    
+    # Calculate whiteness scores for display
+    whiteness_score1 = calculate_whiteness_score(color1)
+    print(f"Whiteness score: {whiteness_score1:.3f}")
     
     # Extract region from the same position in the second image
     x1, y1, x2, y2 = position
@@ -263,8 +363,10 @@ def main(image1_path, image2_path, window_size, step_size):
     
     # Calculate main color of the same region in the second image
     _, color2 = calculate_color_uniformity(region2)
+    whiteness_score2 = calculate_whiteness_score(color2)
     
     print(f"Image 2 same position main color: RGB({color2[0]:.1f}, {color2[1]:.1f}, {color2[2]:.1f})")
+    print(f"Image 2 whiteness score: {whiteness_score2:.3f}")
     
     # Calculate RGB adjustment parameters
     rgb_diff, rgb_ratio = calculate_rgb_adjustment(color1, color2)
@@ -290,8 +392,9 @@ def main(image1_path, image2_path, window_size, step_size):
     print(f"Image 2 overall average: RGB({avg_color2[0]:.1f}, {avg_color2[1]:.1f}, {avg_color2[2]:.1f})")
     print(f"Overall difference: R={overall_diff[0]:+.1f}, G={overall_diff[1]:+.1f}, B={overall_diff[2]:+.1f}")
     
-    # Visualize results
-    visualize_results(img1, img2, region1, region2, position, color1, color2)
+    # Visualize results with whiteness information
+    visualize_results_with_white_info(img1, img2, region1, region2, position, color1, color2, 
+                                     whiteness_score1, whiteness_score2)
     
     return {
         'position': position,
@@ -300,6 +403,8 @@ def main(image1_path, image2_path, window_size, step_size):
         'rgb_difference': rgb_diff,
         'rgb_ratio': rgb_ratio,
         'uniformity_score': uniformity_score,
+        'whiteness_score1': whiteness_score1,
+        'whiteness_score2': whiteness_score2,
         'overall_avg1': avg_color1,
         'overall_avg2': avg_color2,
         'overall_diff': overall_diff,
@@ -310,13 +415,14 @@ def main(image1_path, image2_path, window_size, step_size):
 # Usage example
 if __name__ == "__main__":
     # Replace with your image paths
-    image1_path = r"C:\Users\hti07022\Desktop\compare_labels\test1_color.png"  # Original image
-    image2_path = r"C:\Users\hti07022\Desktop\compare_labels\aligned_results\reference_image2.jpg"  # Adjusted image
+    image1_path = r"C:\Users\hti07022\Desktop\compare_labels\white_priority_results\aligned_image1.jpg"  # Original image
+    image2_path = r"C:\Users\hti07022\Desktop\compare_labels\white_priority_results\reference_image2.jpg"  # Adjusted image
     
-    # Run analysis
+    # Run analysis with white priority
     # window_size: Search window size (pixels)
-    # step_size: Search step size (pixels)
-    results = main(image1_path, image2_path, window_size=100, step_size=50)
+    # step_size: Search step size (pixels)  
+    # uniformity_threshold: Threshold for considering regions as "high uniformity" (default 0.99)
+    results = main(image1_path, image2_path, window_size=70, step_size=30, uniformity_threshold=0.99)
     
     # You can use these results to apply color adjustments
     print("\n=== How to Use These Parameters ===")
@@ -335,50 +441,53 @@ if __name__ == "__main__":
     print(f"   Overall G difference: {results['overall_diff'][1]:+.1f}")
     print(f"   Overall B difference: {results['overall_diff'][2]:+.1f}")
     
-    # If uniform region difference is small, suggest using overall difference
+    # Enhanced recommendation with whiteness consideration
     region_diff_magnitude = np.linalg.norm(results['rgb_difference'])
     overall_diff_magnitude = np.linalg.norm(results['overall_diff'])
     
-    print(f"\n=== Recommendation ===")
+    print(f"\n=== Enhanced Recommendation (with White Priority) ===")
+    print(f"Selected region whiteness score: {results['whiteness_score1']:.3f}")
     print(f"Uniform region difference magnitude: {region_diff_magnitude:.2f}")
     print(f"Overall image difference magnitude: {overall_diff_magnitude:.2f}")
     
-    if region_diff_magnitude < 5.0 and overall_diff_magnitude > region_diff_magnitude:
-        print("Recommendation: Uniform region difference is small, the region selection may be inappropriate. Consider using overall image difference.")
-        use_overall = True
+    if results['whiteness_score1'] > 0.7:
+        print("✓ High whiteness region selected - ideal for color correction")
+        use_region = True
+    elif region_diff_magnitude < 5.0 and overall_diff_magnitude > region_diff_magnitude:
+        print("⚠ Low whiteness and small region difference - consider using overall image difference")
+        use_region = False
     else:
-        print("Recommendation: Using uniform region difference values is more accurate")
-        use_overall = False
+        print("✓ Using selected region difference values")
+        use_region = True
     
     print("\n=== Applying Adjustments to Images ===")
     print("Goal: Adjust img1 (vendor photo) to match img2 (design photo)")
     
-    # Decide which parameter to adjust
-    if use_overall:
+    # Decide which parameter to use
+    if use_region:
+        adjustment_diff = results['rgb_difference']
+        adjustment_ratio = results['rgb_ratio']
+        print("Using selected region difference for adjustment")
+    else:
         adjustment_diff = results['overall_diff']
         adjustment_ratio = np.where(results['overall_avg1'] != 0, 
                                    results['overall_avg2'] / results['overall_avg1'], 1.0)
         print("Using overall image difference for adjustment")
-    else:
-        adjustment_diff = results['rgb_difference']
-        adjustment_ratio = results['rgb_ratio']
-        print("Using uniform region difference for adjustment")
     
     print(f"Adjustment difference: R={adjustment_diff[0]:+.2f}, G={adjustment_diff[1]:+.2f}, B={adjustment_diff[2]:+.2f}")
-    
-    methods = ['linear', 'ratio', 'hybrid']
     
     # Make img1 look more alike to img2
     img_to_adjust = results['img1']  
     target_img = results['img2']     
-    base_output_path = r"C:\Users\hti07022\Desktop\compare_labels\color_adjust_results\vendor_adjusted"
+    base_output_path = r"C:\Users\hti07022\Desktop\compare_labels\color_adjust_results\vendor_adjusted_white_priority"
     
-    print(f"\nAdjusting vendor photo (img1) to match design photo (img2)...")
-    
-    
-    print(f"\nApplying {'ratio'} adjustment...")
+    print(f"\nApplying ratio adjustment with white priority...")
     adjusted_img = adjust_image(img_to_adjust, adjustment_diff, adjustment_ratio, 'ratio')    
-    output_path = f"{base_output_path}_{'ratio'}.jpg"
+    output_path = f"{base_output_path}_ratio.jpg"
+    
+    # Create output directory if it doesn't exist
+    import os
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     save_adjusted_image(adjusted_img, output_path)
         
     # Show comparison 
@@ -386,7 +495,7 @@ if __name__ == "__main__":
         
     # Calculate the difference after adjustment
     adjusted_avg = np.mean(adjusted_img, axis=(0, 1))
-    target_avg = results['overall_avg2']  # The color of img1 is the target
+    target_avg = results['overall_avg2']
     diff_after_adjustment = np.mean(np.abs(adjusted_avg - target_avg))
         
     print(f"Color difference between adjusted vendor photo and design photo: {diff_after_adjustment:.2f}")
@@ -394,8 +503,17 @@ if __name__ == "__main__":
     # Show three way comparison
     show_three_way_comparison(img_to_adjust, adjusted_img, target_img, 'ratio')
     
-    print("\n=== All adjustments completed! ===")
-    print("Vendor photo has been adjusted to match design photo.")
-    print("Check the output files:")
+    print("\n=== All adjustments completed with White Priority! ===")
+    print("Features applied:")
+    print("• White region priority when multiple high uniformity regions exist")
+    print("• Whiteness scoring based on distance from white, channel balance, and minimum values")
+    print("• Enhanced visualization showing whiteness scores")
+    print(f"• Output saved to: {output_path}")
+    print(f"• Selected region whiteness score: {results['whiteness_score1']:.3f}")
     
-    print(f"- {base_output_path}_{'ratio'}.jpg")
+    if results['whiteness_score1'] > 0.8:
+        print("✓ Excellent white region selected for color correction")
+    elif results['whiteness_score1'] > 0.6:
+        print("✓ Good white region selected for color correction")
+    else:
+        print("⚠ Selected region has low whiteness - results may vary")
