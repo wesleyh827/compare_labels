@@ -5,7 +5,7 @@ from typing import Tuple, List, Optional, Dict
 import easyocr
 from difflib import SequenceMatcher
 import re
-import color_correction  # 使用新的white priority版本
+import color_correction
 import os
 
 class EnhancedTextComparison:
@@ -500,17 +500,18 @@ class ImageAligner:
         # Feature matching parameters
         self.feature_match_ratio = 0.9
         self.ransac_threshold = 2.0
-        
+        self.border_mode = 'REFLECT_101'
+
         # White priority color correction parameters
         self.color_correction_enabled = True
         self.color_correction_window_size = 50
-        self.color_correction_step_size = 30
+        self.color_correction_step_size = 50
         self.uniformity_threshold = 0.99  # 新增：白色優先閾值
         
         # EasyOCR parameters
         self.easyocr_reader = None
         self.easyocr_languages = ['en']
-        self.text_similarity_threshold = 0.5
+        self.text_similarity_threshold = 0.5 
     
     def detect_corners_sift(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Detect feature points using SIFT"""
@@ -547,7 +548,7 @@ class ImageAligner:
         search_params = dict(checks=50)
         flann = cv2.FlannBasedMatcher(index_params, search_params)
         
-        # Perform matching
+        # Perform matching 
         matches = flann.knnMatch(desc1, desc2, k=2)
         
         # Filter good matches using Lowe's ratio test
@@ -608,7 +609,42 @@ class ImageAligner:
             
         # Align images
         height, width = img2.shape[:2]
-        aligned_img1 = cv2.warpPerspective(img1, homography, (width, height))
+        if self.border_mode == 'REFLECT_101':
+           # 反射邊界（不重複邊緣像素）- 推薦用於大多數標籤
+           aligned_img1 = cv2.warpPerspective(
+               img1, homography, (width, height),
+               borderMode=cv2.BORDER_REFLECT_101
+           )
+           print("使用反射邊界延伸(REFLECT_101)")
+            
+        elif self.border_mode == 'REPLICATE':
+            # 複製邊緣像素 - 適合純色背景
+            aligned_img1 = cv2.warpPerspective(
+                img1, homography, (width, height),
+                borderMode=cv2.BORDER_REPLICATE
+            )
+            print("使用邊緣像素複製(REPLICATE)")
+            
+        elif self.border_mode == 'REFLECT':
+            # 反射邊界（重複邊緣像素）
+            aligned_img1 = cv2.warpPerspective(
+                img1, homography, (width, height),
+                borderMode=cv2.BORDER_REFLECT
+            )
+            print("使用反射邊界延伸(REFLECT)")
+            
+        elif self.border_mode == 'WRAP':
+            # 環形包裝
+            aligned_img1 = cv2.warpPerspective(
+                img1, homography, (width, height),
+                borderMode=cv2.BORDER_WRAP
+            )
+            print("使用環形包裝延伸(WRAP)")
+            
+        else:
+            # 預設還是用原來的黑邊（向下兼容）
+            aligned_img1 = cv2.warpPerspective(img1, homography, (width, height))
+            print("使用原始黑邊填充")
         
         return aligned_img1, img2, {"matches": matches, "corners1": corners1, "corners2": corners2}
     
@@ -748,16 +784,23 @@ class ImageAligner:
         gray_diff = cv2.absdiff(gray1, gray2)
         _, gray_diff_binary = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY)
         
-        # 2. Color difference analysis
+        # 2. Color difference analysis 如果用rgb值裡面
         color_diff = cv2.absdiff(img1, img2)
-        
-        # Calculate color distance for each pixel (Euclidean distance)
-        color_distance = np.sqrt(np.sum(color_diff.astype(float)**2, axis=2))
-        
+
+        max_indices = np.argmax(img1, axis=2)
+
+        # 建立一張空白的色彩差異圖 (灰階)
+        color_distance = np.zeros_like(max_indices, dtype=np.uint8)
+
+        # 根據主導通道，填入對應通道的差異
+        for i in range(3):
+            mask = (max_indices == i)  # i = 0(B), 1(G), 2(R)
+            color_distance[mask] = color_diff[:, :, i][mask]
+
         # Create binary image for color differences
-        color_threshold = 50
-        _, color_diff_binary = cv2.threshold(color_distance.astype(np.uint8), 
-                                            color_threshold, 255, cv2.THRESH_BINARY)
+        color_threshold = 13
+        _, color_diff_binary = cv2.threshold(color_distance, color_threshold, 255, cv2.THRESH_BINARY)
+        color_diff_binary = color_diff_binary.astype(np.uint8)
         
         # 3. Combined difference analysis
         combined_diff_binary = cv2.bitwise_or(gray_diff_binary, color_diff_binary)
@@ -838,7 +881,7 @@ class ImageAligner:
         }
     
     def compare_aligned_images_with_correction_info(self, img1: np.ndarray, img2: np.ndarray, 
-                                                   correction_info: Dict, threshold: int = 30):
+                                                   correction_info: Dict, threshold: int = 50):
         """Enhanced image comparison with color analysis and correction info"""
         print("=== Enhanced Image Comparison with White Priority Color Analysis ===")
         
@@ -880,29 +923,28 @@ class ImageAligner:
         axes[1, 1].axis('off')
         
         # Third row: difference analysis
-        axes[2, 0].imshow(analysis['diff_image'], cmap='hot')
-        axes[2, 0].set_title('Color Distance Heatmap')
+        
+        axes[3, 0].imshow(analysis['diff_binary'], cmap='gray')
+        axes[3, 0].set_title(f'Combined Difference Map (threshold={threshold})')
+        axes[3, 0].axis('off')
+
+        axes[3, 1].axis('off') 
+        
+        # Fourth row: various difference comparisons 
+        axes[2, 0].imshow(analysis['gray_diff_binary'], cmap='gray')
+        axes[2, 0].set_title(f'Structural Differences ({analysis["gray_similarity"]:.1f}%)')
         axes[2, 0].axis('off')
         
-        axes[2, 1].imshow(analysis['diff_binary'], cmap='gray')
-        axes[2, 1].set_title(f'Combined Difference Map (threshold={threshold})')
+        axes[2, 1].imshow(analysis['color_diff_binary'], cmap='gray')
+        axes[2, 1].set_title(f'Color Differences ({analysis["color_similarity"]:.1f}%)')
         axes[2, 1].axis('off')
-        
-        # Fourth row: various difference comparisons
-        axes[3, 0].imshow(analysis['gray_diff_binary'], cmap='gray')
-        axes[3, 0].set_title(f'Structural Differences ({analysis["gray_similarity"]:.1f}%)')
-        axes[3, 0].axis('off')
-        
-        axes[3, 1].imshow(analysis['color_diff_binary'], cmap='gray')
-        axes[3, 1].set_title(f'Color Differences ({analysis["color_similarity"]:.1f}%)')
-        axes[3, 1].axis('off')
         
         # Add detailed statistical information with white priority info
         title_text = f'''Image Comparison Analysis with White Priority - Combined Similarity: {analysis["combined_similarity"]:.2f}%
 Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {analysis["color_similarity"]:.1f}%
 {analysis["main_difference_type"]}'''
         
-        fig.suptitle(title_text, fontsize=12)
+        fig.suptitle(title_text, fontsize=12) 
         plt.tight_layout()
         plt.show()
         
@@ -926,7 +968,7 @@ Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {a
         print(f"   Reference region whiteness: {correction_info['whiteness_score2']:.3f}")
         print(f"   Selected region position: {correction_info['selected_region_position']}")
         
-        print(f"\nSimilarity Analysis:")
+        print(f"\nSimilarity Analysis:") # I'm only one call away nothing's gonna stay my way superman's got nothing on me I'm only one call away 
         print(f"   Structural similarity (grayscale): {analysis['gray_similarity']:.2f}%")
         print(f"   Color similarity: {analysis['color_similarity']:.2f}%")
         print(f"   Combined similarity: {analysis['combined_similarity']:.2f}%")
@@ -942,7 +984,7 @@ Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {a
         print(f"   Significant difference regions: {len(analysis['contours'])}")
         print(f"   Has significant color differences: {'Yes' if analysis['is_significant_color_difference'] else 'No'}")
         
-        # White priority specific assessment
+        # White priority specific assessment 還以為
         print(f"\nWhite Priority Assessment:")
         if correction_info['whiteness_score1'] > 0.8:
             white_assessment = "Excellent white region selected - ideal for color correction"
@@ -965,7 +1007,7 @@ Structural Similarity: {analysis["gray_similarity"]:.1f}% | Color Similarity: {a
         else:
             assessment = "Images have significant differences, white priority correction may be insufficient"
         
-        print(f"\nOverall Assessment: {assessment}")
+        print(f"\nOverall Assessment: {assessment}") 
         
         # Special reminder for color differences
         if analysis['is_significant_color_difference']:
@@ -999,13 +1041,13 @@ def main():
     aligner.color_correction_window_size = 50
     aligner.color_correction_step_size = 50
     aligner.uniformity_threshold = 0.99  # 可調整的白色優先閾值
-
+    aligner.border_mode = 'REFLECT' # 可自由選擇邊界填充模式 don't stop 
     print("=== Enhanced Image Alignment Workflow with White Priority Color Correction ===")
     
-    # Read images - Please modify to your actual image paths
-    img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\d.jpg'
-    img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\d.jpg'
-    
+    # Read images - Please modify to your actual image paths 
+    img1_path = r'C:\Users\hti07022\Desktop\compare_labels\actual_images\a.jpg'
+    img2_path = r'C:\Users\hti07022\Desktop\compare_labels\design_images\a.jpg' 
+
     print(f"Reading images...")
     print(f"Vendor image path: {img1_path}")
     print(f"Design image path: {img2_path}")
@@ -1056,7 +1098,7 @@ def main():
         
         # Use enhanced color-aware comparison method with correction info
         enhanced_analysis = aligner.compare_aligned_images_with_correction_info(
-            color_corrected_img1, img2, correction_info, threshold=150 
+            color_corrected_img1, img2, correction_info, threshold=100 
         )
         
         print(f"\nEnhanced analysis results with white priority:")
@@ -1160,7 +1202,7 @@ def main():
                     f.write("=== Enhanced Image Analysis Report with White Priority ===\n")
                     f.write(f"Processing Date: {correction_info.get('processing_date', 'N/A')}\n\n")
                     
-                    # White Priority Information
+                    # White Priority Information 
                     f.write("White Priority Color Correction:\n")
                     f.write(f"Method: {correction_info['method']}\n")
                     f.write(f"White priority applied: {'Yes' if correction_info['white_priority_applied'] else 'No'}\n")
